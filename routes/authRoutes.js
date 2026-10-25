@@ -11,7 +11,7 @@ const { registerUser, loginUser,
     verifyEmailOtp, resendEmailOtp } = require("../controllers/authController");
 const {
     googleLogin,
-    facebookLogin,
+
 } = require("../controllers/socialAuthController");
 
 
@@ -19,8 +19,7 @@ const router = express.Router();
 
 router.post("/register", registerUser);
 router.post("/login", loginUser);
-router.post("/google", googleLogin);
-router.post("/facebook", facebookLogin);
+router.post("/google", googleLogin)
 
 router.post("/verify-email", verifyEmailOtp);
 router.post("/resend-otp", resendEmailOtp);
