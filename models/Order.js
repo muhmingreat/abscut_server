@@ -17,7 +17,12 @@ const orderItemSchema = new mongoose.Schema(
 
     image: {
       type: String,
-      required: true,
+      default: "",
+      trim: true,
+    },
+    video: {
+      type: String,
+      default: "",
       trim: true,
     },
 

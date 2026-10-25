@@ -1,5 +1,6 @@
 
-const { v2: cloudinary } = require("cloudinary");
+const { v2: cloudinary } = require("cloudinary")
+
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,

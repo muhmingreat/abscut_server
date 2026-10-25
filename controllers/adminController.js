@@ -1057,7 +1057,7 @@ const adjustInventoryStock = async (req, res) => {
           : "Unable to adjust inventory stock.",
     });
   } finally {
-    await session.endSession();
+    await session.endSession()
   }
 };
 

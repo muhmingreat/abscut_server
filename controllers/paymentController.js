@@ -9,9 +9,8 @@ const flutterwave = require("../config/flutterwave");
 const Order = require("../models/Order");
 const CustomOrder = require("../models/CustomOrder");
 const Payment = require("../models/Payment");
-const CustomOrderInstallmentSettings = require(
-  "../models/CustomOrderInstallmentSettings"
-);
+const CustomOrderInstallmentSettings = require("../models/CustomOrderInstallmentSettings");
+const { notifyAdminPayment } = require("../services/notificationService");
 
 // ============================================================
 // CONSTANTS
@@ -40,12 +39,20 @@ const toKobo = (amount) => Math.round(Number(amount) * 100);
 
 const fromKobo = (amount) => Number(amount) / 100;
 
-const isValidObjectId = (id) =>
-  mongoose.Types.ObjectId.isValid(id);
+const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
 
 const makeReference = (prefix = "ABS-CUT") =>
   `${prefix}-${Date.now()}-${crypto.randomUUID()}`;
 
+// const getFrontendCallbackUrl = () => {
+//   const frontendUrl = process.env.FRONTEND_URL;
+
+//   if (!frontendUrl) {
+//     throw new Error("FRONTEND_URL_MISSING");
+//   }
+
+//   return `${frontendUrl.replace(/\/+$/, "")}/payments/callback`;
+// };
 const getFrontendCallbackUrl = () => {
   const frontendUrl = process.env.FRONTEND_URL;
 
@@ -53,17 +60,13 @@ const getFrontendCallbackUrl = () => {
     throw new Error("FRONTEND_URL_MISSING");
   }
 
-  return `${frontendUrl.replace(/\/+$/, "")}/payment/callback`;
+  return `${frontendUrl.replace(/\/+$/, "")}/payments/callback`;
 };
 
-const getUserId = (req) =>
-  req.user?._id || req.user?.id;
+const getUserId = (req) => req.user?._id || req.user?.id;
 
 const getCustomerEmail = (order) =>
-  order?.customer?.email ||
-  order?.user?.email ||
-  order?.email ||
-  "";
+  order?.customer?.email || order?.user?.email || order?.email || "";
 
 const getErrorMessage = (error) =>
   error?.response?.data?.message ||
@@ -73,10 +76,7 @@ const getErrorMessage = (error) =>
 
 const sendError = (res, error, fallbackMessage) => {
   const messages = {
-    FRONTEND_URL_MISSING: [
-      500,
-      "The payment callback URL is not configured.",
-    ],
+    FRONTEND_URL_MISSING: [500, "The payment callback URL is not configured."],
 
     PAYSTACK_CHECKOUT_URL_MISSING: [
       502,
@@ -90,25 +90,13 @@ const sendError = (res, error, fallbackMessage) => {
 
     ORDER_NOT_FOUND: [404, "Order not found."],
 
-    CUSTOM_ORDER_NOT_FOUND: [
-      404,
-      "Custom order not found.",
-    ],
+    CUSTOM_ORDER_NOT_FOUND: [404, "Custom order not found."],
 
-    ORDER_CANCELLED: [
-      400,
-      "This order has been cancelled and cannot be paid.",
-    ],
+    ORDER_CANCELLED: [400, "This order has been cancelled and cannot be paid."],
 
-    ORDER_ALREADY_PAID: [
-      400,
-      "This order has already been paid for.",
-    ],
+    ORDER_ALREADY_PAID: [400, "This order has already been paid for."],
 
-    INVALID_ORDER_TOTAL: [
-      400,
-      "The order total is invalid.",
-    ],
+    INVALID_ORDER_TOTAL: [400, "The order total is invalid."],
 
     QUOTATION_NOT_READY: [
       400,
@@ -155,10 +143,7 @@ const sendError = (res, error, fallbackMessage) => {
       "The payment currency does not match the expected currency.",
     ],
 
-    PAYMENT_REFERENCE_MISMATCH: [
-      400,
-      "The payment reference does not match.",
-    ],
+    PAYMENT_REFERENCE_MISMATCH: [400, "The payment reference does not match."],
 
     PAYMENT_NOT_CONFIRMED: [
       400,
@@ -170,10 +155,7 @@ const sendError = (res, error, fallbackMessage) => {
       "This payment has already been processed.",
     ],
 
-    PAYMENT_NOT_FOUND: [
-      404,
-      "Payment record not found.",
-    ],
+    PAYMENT_NOT_FOUND: [404, "Payment record not found."],
 
     PAYMENT_NOT_AWAITING_CONFIRMATION: [
       400,
@@ -190,10 +172,7 @@ const sendError = (res, error, fallbackMessage) => {
       "Enter the name used to make the bank transfer.",
     ],
 
-    INVALID_PAYMENT_PROVIDER: [
-      400,
-      "Unsupported payment provider.",
-    ],
+    INVALID_PAYMENT_PROVIDER: [400, "Unsupported payment provider."],
   };
 
   const known = messages[error?.message];
@@ -207,7 +186,7 @@ const sendError = (res, error, fallbackMessage) => {
 
   console.error(
     fallbackMessage || "Payment controller error:",
-    error?.response?.data || error?.message || error
+    error?.response?.data || error?.message || error,
   );
 
   return res.status(500).json({
@@ -224,6 +203,77 @@ const getPaymentError = (message) => new Error(message);
 // ============================================================
 // INSTALLMENT SETTINGS
 // ============================================================
+
+// ============================================================
+// ADMIN PAYMENT NOTIFICATION
+// ============================================================
+
+const notifyAdminPaymentSafely = async ({
+  payment,
+  order: suppliedOrder = null,
+}) => {
+  try {
+    if (!payment) {
+      console.warn("ABS CUT payment notification skipped: missing payment.");
+      return;
+    }
+
+    let order = suppliedOrder;
+
+    if (!order && payment.orderId) {
+      const Model = payment.orderType === "CustomOrder" ? CustomOrder : Order;
+
+      order = await Model.findById(payment.orderId).populate(
+        "user",
+        "firstName lastName email",
+      );
+    }
+
+    if (!order) {
+      console.warn(
+        "ABS CUT payment notification skipped: order not found.",
+        payment.reference,
+      );
+      return;
+    }
+
+    const user = order.user || {};
+
+    const buyerName =
+      [user.firstName, user.lastName].filter(Boolean).join(" ").trim() ||
+      order.name ||
+      order.customerName ||
+      "Customer";
+
+    const customerEmail = getCustomerEmail(order) || user.email || "";
+
+    await notifyAdminPayment({
+      customerName: buyerName,
+      customerEmail,
+      orderId: `${payment.orderType === "CustomOrder" ? "Custom Order" : "Order"} #${order._id}`,
+      amount: payment.amount,
+      paymentReference: payment.reference || order.paymentReference || "",
+      paymentMethod:
+        payment.provider === "bank_transfer"
+          ? "Bank Transfer"
+          : payment.provider === "flutterwave"
+            ? "Flutterwave"
+            : "Paystack",
+    });
+
+    console.info(
+      "ABS CUT admin payment notification sent for:",
+      payment.reference,
+    );
+  } catch (error) {
+    // The payment has already been processed. Do not fail it
+    // just because the notification could not be delivered.
+    console.error(
+      "ABS CUT admin payment notification failed:",
+      error?.message || error,
+    );
+  }
+};
 
 const getInstallmentSettings = async (session = null) => {
   let query = CustomOrderInstallmentSettings.findOne({
@@ -256,17 +306,10 @@ const getInstallmentSettings = async (session = null) => {
 
 const calculateMinimumDeposit = (quotation, settings) => {
   if (settings.minimumDepositType === "fixed") {
-    return Math.max(
-      0,
-      Number(settings.minimumDepositValue || 0)
-    );
+    return Math.max(0, Number(settings.minimumDepositValue || 0));
   }
 
-  return (
-    Number(quotation) *
-    Number(settings.minimumDepositValue || 0) /
-    100
-  );
+  return (Number(quotation) * Number(settings.minimumDepositValue || 0)) / 100;
 };
 
 /**
@@ -278,7 +321,7 @@ const calculateMinimumDeposit = (quotation, settings) => {
 const getCustomPaymentAmount = async (
   customOrder,
   requestedAmount,
-  { session = null } = {}
+  { session = null } = {},
 ) => {
   const quotationKobo = toKobo(customOrder.quotation || 0);
   const amountPaidKobo = toKobo(customOrder.amountPaid || 0);
@@ -304,10 +347,7 @@ const getCustomPaymentAmount = async (
       ? balanceKobo
       : toKobo(requestedAmount);
 
-  if (
-    !Number.isFinite(requestedKobo) ||
-    requestedKobo <= 0
-  ) {
+  if (!Number.isFinite(requestedKobo) || requestedKobo <= 0) {
     throw getPaymentError("INVALID_PAYMENT_AMOUNT");
   }
 
@@ -345,27 +385,19 @@ const getCustomPaymentAmount = async (
     completedPayments = 1;
   }
 
-  if (
-    completedPayments >= Number(settings.maxInstallments)
-  ) {
+  if (completedPayments >= Number(settings.maxInstallments)) {
     throw getPaymentError("MAX_INSTALLMENTS_REACHED");
   }
 
   // Count active checkout attempts when determining whether the
   // maximum installment count is already reserved.
-  if (
-    completedPayments + activePayments >=
-    Number(settings.maxInstallments)
-  ) {
+  if (completedPayments + activePayments >= Number(settings.maxInstallments)) {
     throw getPaymentError("MAX_INSTALLMENTS_REACHED");
   }
 
   if (amountPaidKobo === 0) {
     const minimumDeposit = toKobo(
-      calculateMinimumDeposit(
-        fromKobo(quotationKobo),
-        settings
-      )
+      calculateMinimumDeposit(fromKobo(quotationKobo), settings),
     );
 
     if (requestedKobo < minimumDeposit) {
@@ -388,13 +420,8 @@ const getCustomPaymentAmount = async (
 // ORDER LOOKUP
 // ============================================================
 
-const getNewPaymentOrder = async (
-  req,
-  orderType,
-  orderId,
-  requestedAmount
-) => {
-  const userId = getUserId(req)
+const getNewPaymentOrder = async (req, orderType, orderId, requestedAmount) => {
+  const userId = getUserId(req);
 
   if (!userId) {
     throw getPaymentError("ORDER_NOT_FOUND");
@@ -404,7 +431,7 @@ const getNewPaymentOrder = async (
     throw getPaymentError(
       orderType === "CustomOrder"
         ? "CUSTOM_ORDER_NOT_FOUND"
-        : "ORDER_NOT_FOUND"
+        : "ORDER_NOT_FOUND",
     );
   }
 
@@ -453,16 +480,13 @@ const getNewPaymentOrder = async (
       throw getPaymentError("CUSTOM_ORDER_NOT_FOUND");
     }
 
-    if (
-      String(customOrder.status || "").toLowerCase() ===
-      "cancelled"
-    ) {
+    if (String(customOrder.status || "").toLowerCase() === "cancelled") {
       throw getPaymentError("ORDER_CANCELLED");
     }
 
     const paymentAmounts = await getCustomPaymentAmount(
       customOrder,
-      requestedAmount
+      requestedAmount,
     );
 
     return {
@@ -474,7 +498,6 @@ const getNewPaymentOrder = async (
   throw getPaymentError("INVALID_PAYMENT_PROVIDER");
 };
 
-
 /**
  * Accept the current frontend field `amount` and the older
  * `paymentAmount` field for backward compatibility.
@@ -484,15 +507,11 @@ const getNewPaymentOrder = async (
  * a full-balance payment.
  */
 const getRequestedPaymentAmount = (body = {}) => {
-  if (
-    Object.prototype.hasOwnProperty.call(body, "amount")
-  ) {
+  if (Object.prototype.hasOwnProperty.call(body, "amount")) {
     return body.amount;
   }
 
-  if (
-    Object.prototype.hasOwnProperty.call(body, "paymentAmount")
-  ) {
+  if (Object.prototype.hasOwnProperty.call(body, "paymentAmount")) {
     return body.paymentAmount;
   }
 
@@ -525,11 +544,7 @@ const createPaymentRecord = async ({
   });
 };
 
-const findPaymentByReference = async (
-  reference,
-  provider,
-  userId = null
-) => {
+const findPaymentByReference = async (reference, provider, userId = null) => {
   const filter = {
     reference,
     provider,
@@ -548,7 +563,7 @@ const findPaymentByReference = async (
 
 const verifyPaystackTransaction = async (reference) => {
   const response = await paystack.get(
-    `/transaction/verify/${encodeURIComponent(reference)}`
+    `/transaction/verify/${encodeURIComponent(reference)}`,
   );
 
   return response?.data?.data;
@@ -569,8 +584,11 @@ const initializePayment = async (req, res) => {
       });
     }
 
-    const { order, amount, amountKobo } =
-      await getNewPaymentOrder(req, "Order", orderId);
+    const { order, amount, amountKobo } = await getNewPaymentOrder(
+      req,
+      "Order",
+      orderId,
+    );
 
     const email = getCustomerEmail(order);
 
@@ -584,21 +602,18 @@ const initializePayment = async (req, res) => {
     const reference = makeReference("ABS-CUT");
     const callbackUrl = getFrontendCallbackUrl();
 
-    const response = await paystack.post(
-      "/transaction/initialize",
-      {
-        email,
-        amount: amountKobo,
-        currency: CURRENCY,
-        reference,
-        callback_url: callbackUrl,
-        metadata: {
-          orderId: String(order._id),
-          userId: String(getUserId(req)),
-          orderType: "Order",
-        },
-      }
-    );
+    const response = await paystack.post("/transaction/initialize", {
+      email,
+      amount: amountKobo,
+      currency: CURRENCY,
+      reference,
+      callback_url: callbackUrl,
+      metadata: {
+        orderId: String(order._id),
+        userId: String(getUserId(req)),
+        orderType: "Order",
+      },
+    });
 
     const data = response?.data?.data;
 
@@ -619,11 +634,7 @@ const initializePayment = async (req, res) => {
       currency: CURRENCY,
     });
   } catch (error) {
-    return sendError(
-      res,
-      error,
-      "Initialize product payment error:"
-    );
+    return sendError(res, error, "Initialize product payment error:");
   }
 };
 
@@ -673,9 +684,7 @@ const verifyPayment = async (req, res) => {
       throw getPaymentError("PAYMENT_NOT_CONFIRMED");
     }
 
-    if (
-      String(transaction.currency || "").toUpperCase() !== CURRENCY
-    ) {
+    if (String(transaction.currency || "").toUpperCase() !== CURRENCY) {
       throw getPaymentError("PAYMENT_CURRENCY_MISMATCH");
     }
 
@@ -708,119 +717,6 @@ const verifyPayment = async (req, res) => {
 // CUSTOM ORDER — PAYSTACK INITIALIZATION
 // ============================================================
 
-// const initializeCustomOrderPayment = async (req, res) => {
-//   let payment;
-
-//   try {
-//     const { customOrderId, paymentAmount } = req.body;
-
-//     if (!customOrderId) {
-//       return res.status(400).json({
-//         success: false,
-//         message: "Custom order ID is required.",
-//       });
-//     }
-
-//     const result = await getNewPaymentOrder(
-//       req,
-//       "CustomOrder",
-//       customOrderId,
-//       paymentAmount
-//     );
-
-//     const { order, amount } = result;
-//     const email = getCustomerEmail(order);
-
-//     if (!email) {
-//       return res.status(400).json({
-//         success: false,
-//         message: "A valid customer email is required.",
-//       });
-//     }
-
-//     const reference = makeReference("ABS-CUT-CUSTOM");
-
-//     payment = await createPaymentRecord({
-//       userId: getUserId(req),
-//       orderType: "CustomOrder",
-//       orderId: order._id,
-//       provider: "paystack",
-//       amount,
-//       reference,
-//       metadata: {
-//         purpose: "custom_order_installment",
-//       },
-//     });
-
-//     const response = await paystack.post(
-//       "/transaction/initialize",
-//       {
-//         email,
-//         amount: toKobo(amount),
-//         currency: CURRENCY,
-//         reference,
-//         callback_url: getFrontendCallbackUrl(),
-//         metadata: {
-//           paymentId: String(payment._id),
-//           customOrderId: String(order._id),
-//           userId: String(getUserId(req)),
-//           orderType: "CustomOrder",
-//         },
-//       }
-//     );
-
-//     const data = response?.data?.data;
-
-//     if (!data?.authorization_url || !data?.reference) {
-//       // A definite malformed response is not a usable checkout.
-//       payment.status = "failed";
-//       await payment.save();
-
-//       throw getPaymentError("PAYSTACK_CHECKOUT_URL_MISSING");
-//     }
-
-//     // Retain the latest reference for compatibility with older code.
-//     order.paymentReference = data.reference;
-
-//     if (
-//       Number(order.amountPaid || 0) <= 0 &&
-//       order.paymentStatus === "Not Required"
-//     ) {
-//       order.paymentStatus = CUSTOM_PAYMENT_STATUSES.PENDING;
-//     }
-
-//     await order.save();
-
-//     return res.status(200).json({
-//       success: true,
-//       message: "Custom order payment initialized successfully.",
-//       authorizationUrl: data.authorization_url,
-//       accessCode: data.access_code,
-//       reference: data.reference,
-//       amount,
-//       balance: result.balance,
-//       currency: CURRENCY,
-//       paymentId: payment._id,
-//       installmentSettings: {
-//         enabled: result.settings.enabled,
-//         minimumDepositType: result.settings.minimumDepositType,
-//         minimumDepositValue: result.settings.minimumDepositValue,
-//         maxInstallments: result.settings.maxInstallments,
-//       },
-//     });
-//   } catch (error) {
-//     // Do not mark a payment failed for an uncertain network error.
-//     // The provider might have created the transaction even if our
-//     // server did not receive the response.
-//     return sendError(
-//       res,
-//       error,
-//       "Initialize custom order Paystack payment error:"
-//     );
-//   }
-// };
-
-
 
 const initializeCustomOrderPayment = async (req, res) => {
   let payment;
@@ -840,7 +736,7 @@ const initializeCustomOrderPayment = async (req, res) => {
       req,
       "CustomOrder",
       customOrderId,
-      requestedAmount
+      requestedAmount,
     );
 
     const { order, amount, amountKobo, balance } = result;
@@ -869,25 +765,22 @@ const initializeCustomOrderPayment = async (req, res) => {
       },
     });
 
-    const response = await paystack.post(
-      "/transaction/initialize",
-      {
-        email,
-        // Paystack expects the amount in kobo.
-        // For ₦3,000, this must be 300000, not ₦10,000.
-        amount: amountKobo,
-        currency: CURRENCY,
-        reference,
-        callback_url: getFrontendCallbackUrl(),
-        metadata: {
-          paymentId: String(payment._id),
-          customOrderId: String(order._id),
-          userId: String(getUserId(req)),
-          orderType: "CustomOrder",
-          requestedAmount: amount,
-        },
-      }
-    );
+    const response = await paystack.post("/transaction/initialize", {
+      email,
+      // Paystack expects the amount in kobo.
+      // For ₦3,000, this must be 300000, not ₦10,000.
+      amount: amountKobo,
+      currency: CURRENCY,
+      reference,
+      callback_url: getFrontendCallbackUrl(),
+      metadata: {
+        paymentId: String(payment._id),
+        customOrderId: String(order._id),
+        userId: String(getUserId(req)),
+        orderType: "CustomOrder",
+        requestedAmount: amount,
+      },
+    });
 
     const data = response?.data?.data;
 
@@ -940,7 +833,7 @@ const initializeCustomOrderPayment = async (req, res) => {
     return sendError(
       res,
       error,
-      "Initialize custom order Paystack payment error:"
+      "Initialize custom order Paystack payment error:",
     );
   }
 };
@@ -965,9 +858,7 @@ const applyNewPayment = async ({
 
   try {
     await session.withTransaction(async () => {
-      const payment = await Payment.findById(paymentId).session(
-        session
-      );
+      const payment = await Payment.findById(paymentId).session(session);
 
       if (!payment) {
         throw getPaymentError("PAYMENT_NOT_FOUND");
@@ -1001,9 +892,7 @@ const applyNewPayment = async ({
       let order;
 
       if (payment.orderType === "Order") {
-        order = await Order.findById(payment.orderId).session(
-          session
-        );
+        order = await Order.findById(payment.orderId).session(session);
 
         if (!order) {
           throw getPaymentError("ORDER_NOT_FOUND");
@@ -1037,17 +926,13 @@ const applyNewPayment = async ({
 
         await order.save({ session });
       } else if (payment.orderType === "CustomOrder") {
-        order = await CustomOrder.findById(payment.orderId).session(
-          session
-        );
+        order = await CustomOrder.findById(payment.orderId).session(session);
 
         if (!order) {
           throw getPaymentError("CUSTOM_ORDER_NOT_FOUND");
         }
 
-        if (
-          String(order.status || "").toLowerCase() === "cancelled"
-        ) {
+        if (String(order.status || "").toLowerCase() === "cancelled") {
           throw getPaymentError("ORDER_CANCELLED");
         }
 
@@ -1065,10 +950,7 @@ const applyNewPayment = async ({
           throw getPaymentError("CUSTOM_ORDER_ALREADY_PAID");
         }
 
-        if (
-          paymentAmountKobo <= 0 ||
-          paymentAmountKobo > balanceKobo
-        ) {
+        if (paymentAmountKobo <= 0 || paymentAmountKobo > balanceKobo) {
           throw getPaymentError("PAYMENT_EXCEEDS_BALANCE");
         }
 
@@ -1100,10 +982,7 @@ const applyNewPayment = async ({
 
         if (amountPaidKobo === 0) {
           const minimumDepositKobo = toKobo(
-            calculateMinimumDeposit(
-              fromKobo(quotationKobo),
-              settings
-            )
+            calculateMinimumDeposit(fromKobo(quotationKobo), settings),
           );
 
           if (paymentAmountKobo < minimumDepositKobo) {
@@ -1111,8 +990,7 @@ const applyNewPayment = async ({
           }
         }
 
-        const newAmountPaidKobo =
-          amountPaidKobo + paymentAmountKobo;
+        const newAmountPaidKobo = amountPaidKobo + paymentAmountKobo;
 
         if (newAmountPaidKobo > quotationKobo) {
           throw getPaymentError("PAYMENT_EXCEEDS_BALANCE");
@@ -1167,163 +1045,6 @@ const applyNewPayment = async ({
   }
 };
 
-// ============================================================
-// CUSTOM ORDER — PAYSTACK VERIFICATION
-// ============================================================
-
-// const verifyCustomOrderPayment = async (req, res) => {
-//   try {
-//     const { reference } = req.params;
-
-//     if (!reference) {
-//       return res.status(400).json({
-//         success: false,
-//         message: "Payment reference is required.",
-//       });
-//     }
-
-//     const payment = await findPaymentByReference(
-//       reference,
-//       "paystack",
-//       getUserId(req)
-//     );
-
-//     if (payment) {
-//       if (payment.status === "successful") {
-//         return res.status(200).json({
-//           success: true,
-//           message: "This payment has already been verified.",
-//           payment,
-//         });
-//       }
-
-//       const transaction = await verifyPaystackTransaction(reference);
-
-//       if (
-//         transaction?.status !== "success" ||
-//         transaction?.reference !== reference
-//       ) {
-//         throw getPaymentError("PAYMENT_NOT_CONFIRMED");
-//       }
-
-//       if (
-//         String(transaction.currency || "").toUpperCase() !== CURRENCY
-//       ) {
-//         throw getPaymentError("PAYMENT_CURRENCY_MISMATCH");
-//       }
-
-//       if (Number(transaction.amount) !== toKobo(payment.amount)) {
-//         throw getPaymentError("PAYMENT_AMOUNT_MISMATCH");
-//       }
-
-//       const applied = await applyNewPayment({
-//         paymentId: payment._id,
-//         provider: "paystack",
-//         transactionId: transaction.id,
-//       });
-
-//       return res.status(200).json({
-//         success: true,
-//         message: "Custom order payment verified successfully.",
-//         payment: applied.payment,
-//       });
-//     }
-
-//     // Legacy fallback for custom-order Paystack payments created
-//     // before the Payment ledger was introduced.
-//     const legacyOrder = await CustomOrder.findOne({
-//       user: getUserId(req),
-//       paymentReference: reference,
-//     });
-
-//     if (!legacyOrder) {
-//       throw getPaymentError("CUSTOM_ORDER_NOT_FOUND");
-//     }
-
-//     if (
-//       legacyOrder.paymentStatus === CUSTOM_PAYMENT_STATUSES.PAID
-//     ) {
-//       return res.status(200).json({
-//         success: true,
-//         message: "This custom order has already been paid.",
-//         order: legacyOrder,
-//       });
-//     }
-
-//     const transaction = await verifyPaystackTransaction(reference);
-
-//     if (
-//       transaction?.status !== "success" ||
-//       transaction?.reference !== reference
-//     ) {
-//       throw getPaymentError("PAYMENT_NOT_CONFIRMED");
-//     }
-
-//     if (
-//       String(transaction.currency || "").toUpperCase() !== CURRENCY
-//     ) {
-//       throw getPaymentError("PAYMENT_CURRENCY_MISMATCH");
-//     }
-
-//     const transactionAmountKobo = Number(transaction.amount);
-//     const quotationKobo = toKobo(legacyOrder.quotation || 0);
-//     const paidKobo = toKobo(legacyOrder.amountPaid || 0);
-//     const balanceKobo = quotationKobo - paidKobo;
-
-//     if (
-//       !Number.isFinite(transactionAmountKobo) ||
-//       transactionAmountKobo <= 0 ||
-//       transactionAmountKobo > balanceKobo
-//     ) {
-//       throw getPaymentError("PAYMENT_AMOUNT_MISMATCH");
-//     }
-
-//     // Legacy compatibility path: only allow a transaction that has
-//     // not already been applied to another order.
-//     const duplicate = await CustomOrder.findOne({
-//       paymentTransactionId: String(transaction.id),
-//       _id: { $ne: legacyOrder._id },
-//     });
-
-//     if (duplicate) {
-//       throw getPaymentError("PAYMENT_ALREADY_PROCESSED");
-//     }
-
-//     legacyOrder.amountPaid = fromKobo(
-//       paidKobo + transactionAmountKobo
-//     );
-//     legacyOrder.paymentTransactionId = String(transaction.id);
-//     legacyOrder.paidAt = new Date();
-
-//     if (toKobo(legacyOrder.amountPaid) >= quotationKobo) {
-//       legacyOrder.amountPaid = fromKobo(quotationKobo);
-//       legacyOrder.paymentStatus = CUSTOM_PAYMENT_STATUSES.PAID;
-
-//       if (
-//         legacyOrder.status === "Awaiting Payment" ||
-//         legacyOrder.status === "Pending Payment"
-//       ) {
-//         legacyOrder.status = "Confirmed";
-//       }
-//     } else {
-//       legacyOrder.paymentStatus = CUSTOM_PAYMENT_STATUSES.PARTIAL;
-//     }
-
-//     await legacyOrder.save();
-
-//     return res.status(200).json({
-//       success: true,
-//       message: "Legacy custom order payment verified successfully.",
-//       order: legacyOrder,
-//     });
-//   } catch (error) {
-//     return sendError(
-//       res,
-//       error,
-//       "Verify custom order Paystack payment error:"
-//     );
-//   }
-// };
 const verifyCustomOrderPayment = async (req, res) => {
   try {
     const { reference } = req.params;
@@ -1339,11 +1060,7 @@ const verifyCustomOrderPayment = async (req, res) => {
     /*
      * NEW PAYMENT LEDGER
      */
-    const payment = await findPaymentByReference(
-      reference,
-      "paystack",
-      userId
-    );
+    const payment = await findPaymentByReference(reference, "paystack", userId);
 
     if (payment) {
       if (payment.orderType !== "CustomOrder") {
@@ -1391,44 +1108,78 @@ const verifyCustomOrderPayment = async (req, res) => {
         throw getPaymentError("PAYMENT_NOT_CONFIRMED");
       }
 
-      if (
-        String(transaction.currency || "").toUpperCase() !== CURRENCY
-      ) {
+      if (String(transaction.currency || "").toUpperCase() !== CURRENCY) {
         throw getPaymentError("PAYMENT_CURRENCY_MISMATCH");
       }
 
-      if (
-        Number(transaction.amount) !== toKobo(payment.amount)
-      ) {
+      if (Number(transaction.amount) !== toKobo(payment.amount)) {
         throw getPaymentError("PAYMENT_AMOUNT_MISMATCH");
       }
 
-      // applyNewPayment must apply this ledger entry only once.
-      const applied = await applyNewPayment({
-        paymentId: payment._id,
-        provider: "paystack",
-        transactionId: transaction.id,
-      });
+      // // applyNewPayment must apply this ledger entry only once.
+      // const applied = await applyNewPayment({
+      //   paymentId: payment._id,
+      //   provider: "paystack",
+      //   transactionId: transaction.id,
+      // });
+      // if (!applied.alreadyProcessed) {
+      //   await notifyAdminPaymentSafely({
+      //     payment: applied.payment,
+      //     order: updatedCustomOrder,
+      //   });
+      // }
+      // // Reload the order because applyNewPayment may have updated it.
+      // const updatedCustomOrder = await CustomOrder.findOne({
+      //   _id: payment.orderId,
+      //   user: userId,
+      // });
 
-      // Reload the order because applyNewPayment may have updated it.
-      const updatedCustomOrder = await CustomOrder.findOne({
-        _id: payment.orderId,
-        user: userId,
-      });
+      // if (!updatedCustomOrder) {
+      //   throw getPaymentError("CUSTOM_ORDER_NOT_FOUND");
+      // }
 
-      if (!updatedCustomOrder) {
-        throw getPaymentError("CUSTOM_ORDER_NOT_FOUND");
-      }
+      // return res.status(200).json({
+      //   success: true,
+      //   alreadyVerified: false,
+      //   message: "Custom order payment verified successfully.",
+      //   payment: applied.payment,
+      //   customOrder: updatedCustomOrder,
+      //   orderType: "CustomOrder",
+      //   orderId: String(updatedCustomOrder._id),
+      // });
+      
+const applied = await applyNewPayment({
+  paymentId: payment._id,
+  provider: "paystack",
+  transactionId: transaction.id,
+});
 
-      return res.status(200).json({
-        success: true,
-        alreadyVerified: false,
-        message: "Custom order payment verified successfully.",
-        payment: applied.payment,
-        customOrder: updatedCustomOrder,
-        orderType: "CustomOrder",
-        orderId: String(updatedCustomOrder._id),
-      });
+const updatedCustomOrder = await CustomOrder.findOne({
+  _id: payment.orderId,
+  user: userId,
+});
+
+if (!updatedCustomOrder) {
+  throw getPaymentError("CUSTOM_ORDER_NOT_FOUND");
+}
+
+if (!applied.alreadyProcessed) {
+  await notifyAdminPaymentSafely({
+    payment: applied.payment,
+    order: updatedCustomOrder,
+  });
+}
+
+return res.status(200).json({
+  success: true,
+  alreadyVerified: false,
+  message: "Custom order payment verified successfully.",
+  payment: applied.payment,
+  customOrder: updatedCustomOrder,
+  orderType: "CustomOrder",
+  orderId: String(updatedCustomOrder._id),
+});
+
     }
 
     /*
@@ -1445,9 +1196,7 @@ const verifyCustomOrderPayment = async (req, res) => {
     }
 
     // If the legacy order is already paid, return it successfully.
-    if (
-      legacyOrder.paymentStatus === CUSTOM_PAYMENT_STATUSES.PAID
-    ) {
+    if (legacyOrder.paymentStatus === CUSTOM_PAYMENT_STATUSES.PAID) {
       return res.status(200).json({
         success: true,
         alreadyVerified: true,
@@ -1468,9 +1217,7 @@ const verifyCustomOrderPayment = async (req, res) => {
       throw getPaymentError("PAYMENT_NOT_CONFIRMED");
     }
 
-    if (
-      String(transaction.currency || "").toUpperCase() !== CURRENCY
-    ) {
+    if (String(transaction.currency || "").toUpperCase() !== CURRENCY) {
       throw getPaymentError("PAYMENT_CURRENCY_MISMATCH");
     }
 
@@ -1499,9 +1246,7 @@ const verifyCustomOrderPayment = async (req, res) => {
       throw getPaymentError("PAYMENT_ALREADY_PROCESSED");
     }
 
-    legacyOrder.amountPaid = fromKobo(
-      paidKobo + transactionAmountKobo
-    );
+    legacyOrder.amountPaid = fromKobo(paidKobo + transactionAmountKobo);
 
     legacyOrder.paymentTransactionId = String(transaction.id);
     legacyOrder.paidAt = new Date();
@@ -1533,11 +1278,7 @@ const verifyCustomOrderPayment = async (req, res) => {
       orderId: String(legacyOrder._id),
     });
   } catch (error) {
-    return sendError(
-      res,
-      error,
-      "Verify custom order Paystack payment error:"
-    );
+    return sendError(res, error, "Verify custom order Paystack payment error:");
   }
 };
 // ============================================================
@@ -1565,10 +1306,7 @@ const paystackWebhook = async (req, res) => {
       .digest("hex");
 
     const receivedBuffer = Buffer.from(String(signature), "utf8");
-    const expectedBuffer = Buffer.from(
-      expectedSignature,
-      "utf8"
-    );
+    const expectedBuffer = Buffer.from(expectedSignature, "utf8");
 
     if (
       receivedBuffer.length !== expectedBuffer.length ||
@@ -1615,12 +1353,18 @@ const paystackWebhook = async (req, res) => {
       ) {
         return res.status(400).send("Payment details do not match.");
       }
-
-      await applyNewPayment({
+      const applied = await applyNewPayment({
         paymentId: ledgerPayment._id,
         provider: "paystack",
         transactionId: transaction.id,
       });
+
+      if (!applied.alreadyProcessed) {
+        await notifyAdminPaymentSafely({
+          payment: applied.payment,
+          order: applied.order,
+        });
+      }
 
       return res.status(200).send("Payment processed.");
     }
@@ -1665,9 +1409,7 @@ const paystackWebhook = async (req, res) => {
     });
 
     if (customOrder) {
-      if (
-        customOrder.paymentStatus === CUSTOM_PAYMENT_STATUSES.PAID
-      ) {
+      if (customOrder.paymentStatus === CUSTOM_PAYMENT_STATUSES.PAID) {
         return res.status(200).send("Custom order already paid.");
       }
 
@@ -1702,9 +1444,7 @@ const paystackWebhook = async (req, res) => {
         return res.status(200).send("Duplicate payment ignored.");
       }
 
-      customOrder.amountPaid = fromKobo(
-        amountPaidKobo + paymentAmountKobo
-      );
+      customOrder.amountPaid = fromKobo(amountPaidKobo + paymentAmountKobo);
       customOrder.paymentTransactionId = String(transaction.id);
       customOrder.paidAt = new Date();
 
@@ -1735,7 +1475,7 @@ const paystackWebhook = async (req, res) => {
   } catch (error) {
     console.error(
       "Paystack webhook error:",
-      error?.response?.data || error?.message || error
+      error?.response?.data || error?.message || error,
     );
 
     return res.status(500).send("Webhook processing failed.");
@@ -1748,9 +1488,8 @@ const paystackWebhook = async (req, res) => {
 
 const initializeFlutterwavePayment = async (req, res) => {
   try {
-    // const { orderId, customOrderId, paymentAmount } = req.body;
     const { orderId, customOrderId } = req.body;
-const requestedAmount = getRequestedPaymentAmount(req.body);
+    const requestedAmount = getRequestedPaymentAmount(req.body);
 
     const isCustomOrder = Boolean(customOrderId);
     const orderType = isCustomOrder ? "CustomOrder" : "Order";
@@ -1765,18 +1504,12 @@ const requestedAmount = getRequestedPaymentAmount(req.body);
       });
     }
 
-    // const result = await getNewPaymentOrder(
-    //   req,
-    //   orderType,
-    //   requestedId,
-    //   isCustomOrder ? paymentAmount : undefined
-    // );
     const result = await getNewPaymentOrder(
-  req,
-  orderType,
-  requestedId,
-  isCustomOrder ? requestedAmount : undefined
-);
+      req,
+      orderType,
+      requestedId,
+      isCustomOrder ? requestedAmount : undefined,
+    );
 
     const { order, amount } = result;
     const email = getCustomerEmail(order);
@@ -1789,7 +1522,7 @@ const requestedAmount = getRequestedPaymentAmount(req.body);
     }
 
     const reference = makeReference(
-      isCustomOrder ? "ABS-CUT-FLW-CUSTOM" : "ABS-CUT-FLW"
+      isCustomOrder ? "ABS-CUT-FLW-CUSTOM" : "ABS-CUT-FLW",
     );
 
     const payment = await createPaymentRecord({
@@ -1871,11 +1604,7 @@ const requestedAmount = getRequestedPaymentAmount(req.body);
       paymentId: payment._id,
     });
   } catch (error) {
-    return sendError(
-      res,
-      error,
-      "Initialize Flutterwave payment error:"
-    );
+    return sendError(res, error, "Initialize Flutterwave payment error:");
   }
 };
 
@@ -1885,19 +1614,14 @@ const requestedAmount = getRequestedPaymentAmount(req.body);
 
 const verifyFlutterwavePayment = async (req, res) => {
   try {
-    const {
-      transactionId,
-      transaction_id,
-      tx_ref,
-      reference,
-    } = req.query;
+    const { transactionId, transaction_id, tx_ref, reference } = req.query;
 
     const suppliedTransactionId = String(
-      transactionId || transaction_id || ""
+      transactionId || transaction_id || "",
     ).trim();
 
     const suppliedReference = String(
-      reference || tx_ref || req.params.reference || ""
+      reference || tx_ref || req.params.reference || "",
     ).trim();
 
     // Flutterwave transaction IDs commonly arrive as numeric strings.
@@ -1918,7 +1642,7 @@ const verifyFlutterwavePayment = async (req, res) => {
     const payment = await findPaymentByReference(
       suppliedReference,
       "flutterwave",
-      userId
+      userId,
     );
 
     if (!payment) {
@@ -1978,9 +1702,7 @@ const verifyFlutterwavePayment = async (req, res) => {
      * Verify the transaction directly with Flutterwave.
      */
     const response = await flutterwave.get(
-      `/transactions/${encodeURIComponent(
-        suppliedTransactionId
-      )}/verify`
+      `/transactions/${encodeURIComponent(suppliedTransactionId)}/verify`,
     );
 
     const transaction = response?.data?.data;
@@ -1990,17 +1712,14 @@ const verifyFlutterwavePayment = async (req, res) => {
     }
 
     if (
-      String(transaction.status || "").toLowerCase() !==
-        "successful" ||
+      String(transaction.status || "").toLowerCase() !== "successful" ||
       String(transaction.tx_ref || "") !== payment.reference ||
       String(transaction.id) !== suppliedTransactionId
     ) {
       throw getPaymentError("PAYMENT_NOT_CONFIRMED");
     }
 
-    if (
-      String(transaction.currency || "").toUpperCase() !== CURRENCY
-    ) {
+    if (String(transaction.currency || "").toUpperCase() !== CURRENCY) {
       throw getPaymentError("PAYMENT_CURRENCY_MISMATCH");
     }
 
@@ -2060,11 +1779,7 @@ const verifyFlutterwavePayment = async (req, res) => {
       orderType: payment.orderType,
     });
   } catch (error) {
-    return sendError(
-      res,
-      error,
-      "Verify Flutterwave payment error:"
-    );
+    return sendError(res, error, "Verify Flutterwave payment error:");
   }
 };
 
@@ -2087,15 +1802,9 @@ const flutterwaveWebhook = async (req, res) => {
       return res.status(401).send("Missing webhook signature.");
     }
 
-    const receivedBuffer = Buffer.from(
-      String(receivedHash),
-      "utf8"
-    );
+    const receivedBuffer = Buffer.from(String(receivedHash), "utf8");
 
-    const expectedBuffer = Buffer.from(
-      String(secretHash),
-      "utf8"
-    );
+    const expectedBuffer = Buffer.from(String(secretHash), "utf8");
 
     if (
       receivedBuffer.length !== expectedBuffer.length ||
@@ -2107,10 +1816,7 @@ const flutterwaveWebhook = async (req, res) => {
     const event = req.body?.event;
     const eventData = req.body?.data;
 
-    if (
-      event !== "charge.completed" ||
-      eventData?.status !== "successful"
-    ) {
+    if (event !== "charge.completed" || eventData?.status !== "successful") {
       return res.status(200).send("Event ignored.");
     }
 
@@ -2136,7 +1842,7 @@ const flutterwaveWebhook = async (req, res) => {
 
     // Always verify the transaction with Flutterwave's API.
     const response = await flutterwave.get(
-      `/transactions/${encodeURIComponent(transactionId)}/verify`
+      `/transactions/${encodeURIComponent(transactionId)}/verify`,
     );
 
     const transaction = response?.data?.data;
@@ -2150,17 +1856,27 @@ const flutterwaveWebhook = async (req, res) => {
       return res.status(400).send("Payment details do not match.");
     }
 
-    await applyNewPayment({
-      paymentId: payment._id,
-      provider: "flutterwave",
-      transactionId: transaction.id || transactionId,
-    });
+   
+    
+const applied = await applyNewPayment({
+  paymentId: payment._id,
+  provider: "flutterwave",
+  transactionId: transaction.id || transactionId,
+});
 
-    return res.status(200).send("Payment processed.");
+if (!applied.alreadyProcessed) {
+  await notifyAdminPaymentSafely({
+    payment: applied.payment,
+    order: applied.order,
+  });
+}
+
+return res.status(200).send("Payment processed.");
+
   } catch (error) {
     console.error(
       "Flutterwave webhook error:",
-      error?.response?.data || error?.message || error
+      error?.response?.data || error?.message || error,
     );
 
     return res.status(500).send("Webhook processing failed.");
@@ -2170,8 +1886,6 @@ const flutterwaveWebhook = async (req, res) => {
 // ============================================================
 // BANK TRANSFER — INITIALIZE
 // ============================================================
-
-
 
 const initializeBankTransfer = async (req, res) => {
   try {
@@ -2195,7 +1909,7 @@ const initializeBankTransfer = async (req, res) => {
       req,
       orderType,
       requestedId,
-      isCustomOrder ? requestedAmount : undefined
+      isCustomOrder ? requestedAmount : undefined,
     );
 
     const { order, amount, balance } = result;
@@ -2265,14 +1979,9 @@ const initializeBankTransfer = async (req, res) => {
         "Transfer the exact amount using the payment reference, then submit your transfer details for admin confirmation.",
     });
   } catch (error) {
-    return sendError(
-      res,
-      error,
-      "Initialize bank transfer error:"
-    );
+    return sendError(res, error, "Initialize bank transfer error:");
   }
 };
-
 
 // ============================================================
 // BANK TRANSFER — CUSTOMER SUBMITS TRANSFER DETAILS
@@ -2280,8 +1989,7 @@ const initializeBankTransfer = async (req, res) => {
 
 const submitBankTransfer = async (req, res) => {
   try {
-    const { paymentId, reference, transferSenderName, receiptUrl } =
-      req.body;
+    const { paymentId, reference, transferSenderName, receiptUrl } = req.body;
 
     if (!paymentId && !reference) {
       return res.status(400).json({
@@ -2315,9 +2023,7 @@ const submitBankTransfer = async (req, res) => {
     }
 
     payment.status = "awaiting_confirmation";
-    payment.transferSenderName = String(
-      transferSenderName
-    ).trim();
+    payment.transferSenderName = String(transferSenderName).trim();
 
     if (receiptUrl) {
       payment.receiptUrl = String(receiptUrl).trim();
@@ -2332,11 +2038,7 @@ const submitBankTransfer = async (req, res) => {
       payment,
     });
   } catch (error) {
-    return sendError(
-      res,
-      error,
-      "Submit bank transfer error:"
-    );
+    return sendError(res, error, "Submit bank transfer error:");
   }
 };
 
@@ -2351,9 +2053,7 @@ const confirmBankTransfer = async (req, res) => {
       throw getPaymentError("PAYMENT_NOT_FOUND");
     }
 
-    const transactionNumber = String(
-      bankTransactionId || ""
-    ).trim();
+    const transactionNumber = String(bankTransactionId || "").trim();
 
     if (!transactionNumber) {
       return res.status(400).json({
@@ -2369,15 +2069,11 @@ const confirmBankTransfer = async (req, res) => {
     });
 
     if (!payment) {
-      throw getPaymentError(
-        "PAYMENT_NOT_AWAITING_CONFIRMATION"
-      );
+      throw getPaymentError("PAYMENT_NOT_AWAITING_CONFIRMATION");
     }
 
     if (!payment.transferSenderName) {
-      throw getPaymentError(
-        "BANK_TRANSFER_SENDER_REQUIRED"
-      );
+      throw getPaymentError("BANK_TRANSFER_SENDER_REQUIRED");
     }
 
     // Only proceed after independently verifying the funds
@@ -2388,6 +2084,12 @@ const confirmBankTransfer = async (req, res) => {
       transactionId: transactionNumber,
       confirmedBy: getUserId(req),
     });
+    if (!result.alreadyProcessed) {
+      await notifyAdminPaymentSafely({
+        payment: result.payment,
+        order: result.order,
+      });
+    }
 
     return res.status(200).json({
       success: true,
@@ -2395,11 +2097,7 @@ const confirmBankTransfer = async (req, res) => {
       payment: result.payment,
     });
   } catch (error) {
-    return sendError(
-      res,
-      error,
-      "Confirm bank transfer error:"
-    );
+    return sendError(res, error, "Confirm bank transfer error:");
   }
 };
 
@@ -2422,11 +2120,7 @@ const getPendingBankTransfers = async (req, res) => {
       payments,
     });
   } catch (error) {
-    return sendError(
-      res,
-      error,
-      "Get pending bank transfers error:"
-    );
+    return sendError(res, error, "Get pending bank transfers error:");
   }
 };
 
@@ -2455,7 +2149,7 @@ const rejectBankTransfer = async (req, res) => {
 
     payment.status = "rejected";
     payment.rejectionReason = String(
-      rejectionReason || "Transfer could not be confirmed."
+      rejectionReason || "Transfer could not be confirmed.",
     ).trim();
     payment.rejectedBy = getUserId(req);
     payment.rejectedAt = new Date();
@@ -2468,11 +2162,7 @@ const rejectBankTransfer = async (req, res) => {
       payment,
     });
   } catch (error) {
-    return sendError(
-      res,
-      error,
-      "Reject bank transfer error:"
-    );
+    return sendError(res, error, "Reject bank transfer error:");
   }
 };
 
@@ -2482,13 +2172,7 @@ const rejectBankTransfer = async (req, res) => {
 
 const getAdminPaymentHistory = async (req, res) => {
   try {
-    const {
-      status,
-      provider,
-      orderType,
-      page = 1,
-      limit = 20,
-    } = req.query;
+    const { status, provider, orderType, page = 1, limit = 20 } = req.query;
 
     const filter = {};
 
@@ -2503,18 +2187,12 @@ const getAdminPaymentHistory = async (req, res) => {
       filter.provider = provider;
     }
 
-    if (
-      orderType &&
-      ["Order", "CustomOrder"].includes(orderType)
-    ) {
+    if (orderType && ["Order", "CustomOrder"].includes(orderType)) {
       filter.orderType = orderType;
     }
 
     const safePage = Math.max(1, Number(page) || 1);
-    const safeLimit = Math.min(
-      100,
-      Math.max(1, Number(limit) || 20)
-    );
+    const safeLimit = Math.min(100, Math.max(1, Number(limit) || 20));
 
     const [payments, total] = await Promise.all([
       Payment.find(filter)
@@ -2539,11 +2217,7 @@ const getAdminPaymentHistory = async (req, res) => {
       },
     });
   } catch (error) {
-    return sendError(
-      res,
-      error,
-      "Get admin payment history error:"
-    );
+    return sendError(res, error, "Get admin payment history error:");
   }
 };
 

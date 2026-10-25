@@ -1,151 +1,84 @@
- const axios = require("axios");
+
+const nodemailer = require("nodemailer");
 
 // =====================================================
-// ABS CUT — EMAIL SERVICE
-// Resend API
+// ABS CUT — GMAIL SMTP EMAIL SERVICE
 // =====================================================
 
-const RESEND_API_URL =
-  "https://api.resend.com/emails";
-
-// =====================================================
-// CHECK EMAIL CONFIGURATION
-// =====================================================
-
-function isEmailConfigured() {
-  return Boolean(
-    process.env.RESEND_API_KEY &&
-    process.env.EMAIL_FROM
-  );
-}
+const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+});
 
 // =====================================================
 // SEND EMAIL
 // =====================================================
 
-async function sendEmail({
-  to,
-  subject,
-  html,
-  text = "",
-}) {
-  // -----------------------------------------------
-  // CHECK RECIPIENT
-  // -----------------------------------------------
-
+async function sendEmail({ to, subject, text, html }) {
   if (!to) {
-    console.warn(
-      "📧 Email skipped: recipient is missing."
-    );
-
-    return {
-      success: false,
-      skipped: true,
-      reason: "missing-recipient",
-    };
+    throw new Error("Email recipient is required.");
   }
 
-  // -----------------------------------------------
-  // CHECK ENVIRONMENT VARIABLES
-  // -----------------------------------------------
-
-  if (!isEmailConfigured()) {
-    console.warn(
-      "📧 Email skipped: RESEND_API_KEY or EMAIL_FROM is not configured."
+  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+    throw new Error(
+      "Missing EMAIL_USER or EMAIL_PASS environment variables."
     );
-
-    return {
-      success: false,
-      skipped: true,
-      reason: "not-configured"
-
-    };
   }
-
-  // -----------------------------------------------
-  // SEND EMAIL
-  // -----------------------------------------------
 
   try {
-    const response =
-      await axios.post(
-        RESEND_API_URL,
-        {
-          from:
-            process.env.EMAIL_FROM,
-
-          to:
-            Array.isArray(to)
-              ? to
-              : [to],
-
-          subject,
-
-          html,
-
-          text,
-        },
-        {
-          headers: {
-            Authorization:
-              `Bearer ${process.env.RESEND_API_KEY}`,
-
-            "Content-Type":
-              "application/json",
-          },
-
-          timeout:
-            15000,
-        }
-      );
+    const result = await transporter.sendMail({
+      from: `"ABS CUT" <${process.env.EMAIL_USER}>`,
+      to,
+      subject,
+      text,
+      html: html || undefined,
+    });
 
     console.log(
-      "✅ EMAIL SENT:",
-      response.data?.id ||
-        "No message ID"
+      `ABS CUT email accepted: ${result.messageId}`
     );
 
     return {
       success: true,
-
-      id:
-        response.data?.id ||
-        null,
-
-      provider:
-        "resend",
+      messageId: result.messageId,
     };
-
   } catch (error) {
-    const providerMessage =
-      error.response?.data?.message ||
-      error.response?.data?.name ||
-      error.message;
+    console.error("ABS CUT Gmail delivery failed:", {
+      message: error.message,
+      code: error.code,
+      responseCode: error.responseCode,
+    });
 
-    console.error(
-      "❌ EMAIL SEND FAILED:",
-      providerMessage
-    );
-
-    return {
-      success: false,
-
-      skipped: false,
-
-      provider:
-        "resend",
-
-      error:
-        providerMessage,
-    };
+    throw error;
   }
 }
 
 // =====================================================
-// EXPORTS
+// VERIFY EMAIL CONNECTION
 // =====================================================
+
+async function verifyEmailConnection() {
+  try {
+    await transporter.verify();
+
+    console.log("ABS CUT Gmail SMTP connection is ready.");
+
+    return true;
+  } catch (error) {
+    console.error(
+      "ABS CUT Gmail SMTP connection failed:",
+      error.message
+    );
+
+    return false;
+  }
+}
 
 module.exports = {
   sendEmail,
-  isEmailConfigured,
+  verifyEmailConnection,
 };
+

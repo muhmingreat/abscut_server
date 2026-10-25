@@ -22,9 +22,20 @@ const protect = async (req, res, next) => {
       process.env.JWT_SECRET
     );
 
-    const user = await User.findById(
-      decoded.userId
-    ).select("-password");
+const userId =
+  decoded.userId ||
+  decoded.id ||
+  decoded._id;
+
+if (!userId) {
+  return res.status(401).json({
+    success: false,
+    message: "Invalid authentication token. Please log in again.",
+  });
+}
+
+const user = await User.findById(userId)
+  .select("-password");
 
     if (!user) {
       return res.status(401).json({

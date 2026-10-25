@@ -154,7 +154,8 @@ const createOrder = async (req, res) => {
       orderItems.push({
         product: product._id,
         name: product.name,
-        image: product.image,
+        image: product.image || "",
+        video: product.video || "",
         price: product.price,
         quantity: cartItem.quantity,
       });
