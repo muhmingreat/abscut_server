@@ -2,15 +2,23 @@ const mongoose = require("mongoose");
 
 const connectDB = async () => {
   try {
-    const connection = await mongoose.connect(process.env.MONGO_URI)
+    const mongoUri = process.env.MONGO_URI;
 
-    console.log(
-      `MongoDB connected suceessfully.`
-    );
+    if (!mongoUri) {
+      throw new Error("MONGO_URI is missing from the environment.");
+    }
+
+    await mongoose.connect(mongoUri, {
+      serverSelectionTimeoutMS: 10000,
+    });
+
+    console.log("ABS CUT MongoDB connected successfully.");
+
+    return mongoose.connection;
   } catch (error) {
-    console.error("MongoDB connection failed:", error.message) 
-    process.exit(1);
+    console.error("ABS CUT MongoDB connection failed:", error.message);
+    throw error;
   }
 };
 
-module.exports = connectDB
+module.exports = connectDB;

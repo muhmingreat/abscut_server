@@ -22,11 +22,11 @@ const chatRoutes = require("./routes/chatRoutes");
 
 const initializeChatSocket = require("./socket/chatSocket");
 const connectDB = require("./config/db");
-const { verifyEmailConnection } = require("./services/emailService");
-const { sendEmail } = require("./services/emailService");
+
+
 const productEngagementRoutes = require("./routes/productEngagementRoutes");
 
-verifyEmailConnection();
+
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -40,7 +40,7 @@ const server = http.createServer(app);
 
 const allowedOrigins = [
   "http://localhost:5173",
-  // "https://abscut-client.vercel.app",
+  "https://abscut-client.vercel.app",
 ];
 
 // Add any additional configured frontend origin.
