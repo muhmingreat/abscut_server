@@ -5,13 +5,31 @@ const nodemailer = require("nodemailer");
 // ABS CUT — GMAIL SMTP EMAIL SERVICE
 // =====================================================
 
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-});
+let transporter = null;
+
+function getTransporter() {
+  const emailUser = process.env.EMAIL_USER?.trim();
+  const emailPass = process.env.EMAIL_PASS?.trim();
+
+  if (!emailUser || !emailPass) {
+    throw new Error(
+      "Missing EMAIL_USER or EMAIL_PASS. Check server/.env."
+    );
+  }
+
+  // Initialize only after environment variables are available.
+  if (!transporter) {
+    transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: {
+        user: emailUser,
+        pass: emailPass,
+      },
+    });
+  }
+
+  return transporter;
+}
 
 // =====================================================
 // SEND EMAIL
@@ -22,15 +40,11 @@ async function sendEmail({ to, subject, text, html }) {
     throw new Error("Email recipient is required.");
   }
 
-  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
-    throw new Error(
-      "Missing EMAIL_USER or EMAIL_PASS environment variables."
-    );
-  }
-
   try {
-    const result = await transporter.sendMail({
-      from: `"ABS CUT" <${process.env.EMAIL_USER}>`,
+    const mailTransporter = getTransporter();
+
+    const result = await mailTransporter.sendMail({
+      from: `"ABS CUT" <${process.env.EMAIL_USER.trim()}>`,
       to,
       subject,
       text,
@@ -62,9 +76,13 @@ async function sendEmail({ to, subject, text, html }) {
 
 async function verifyEmailConnection() {
   try {
-    await transporter.verify();
+    const mailTransporter = getTransporter();
 
-    console.log("ABS CUT Gmail SMTP connection is ready.");
+    await mailTransporter.verify();
+
+    console.log(
+      "ABS CUT Gmail SMTP connection is ready."
+    );
 
     return true;
   } catch (error) {
@@ -80,5 +98,5 @@ async function verifyEmailConnection() {
 module.exports = {
   sendEmail,
   verifyEmailConnection,
-};
+}
 

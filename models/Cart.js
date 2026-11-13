@@ -1,3 +1,5 @@
+
+
 const mongoose = require("mongoose");
 
 const cartItemSchema = new mongoose.Schema(
@@ -8,14 +10,28 @@ const cartItemSchema = new mongoose.Schema(
       required: true,
     },
 
+    // physical or digital purchase
+    purchaseMode: {
+      type: String,
+      enum: ["physical", "digital"],
+      default: "physical",
+    },
+
+    // piece, yard, or design
+    priceUnit: {
+      type: String,
+      enum: ["piece", "yard", "design"],
+      required: true,
+    },
+
     quantity: {
       type: Number,
       required: true,
-      min: 1,
+      min: 0.5,
     },
   },
   {
-    _id: false,
+    _id: true,
   }
 );
 

@@ -7,6 +7,8 @@ const CustomOrderInstallmentSettings = require("../models/CustomOrderInstallment
 const {
   notifyCustomOrderSubmitted,
   notifyCustomOrderStatus,
+  createNotification,
+  notifyAdmins,
 } = require("../services/notificationService");
 
 // =====================================================
@@ -257,19 +259,66 @@ const createCustomOrder = async (req, res) => {
     });
 
     // Notifications must not invalidate a successfully saved order.
-    Promise.allSettled([
-      notifyCustomOrderSubmitted({
-        name: `${req.user.firstName} ${req.user.lastName}`,
-        email: req.user.email,
-        phone: req.user.phone,
-        customOrderId: customOrder._id,
-      }),
-    ]).then((results) => {
-      console.log(
-        "ABS CUT custom order submission notification results:",
-        results
-      );
-    });
+    // Promise.allSettled([
+    //   notifyCustomOrderSubmitted({
+    //     name: `${req.user.firstName} ${req.user.lastName}`,
+    //     email: req.user.email,
+    //     phone: req.user.phone,
+    //     customOrderId: customOrder._id,
+    //   }),
+    // ]).then((results) => {
+    //   console.log(
+    //     "ABS CUT custom order submission notification results:",
+    //     results
+    //   );
+    // });
+    // =====================================================
+// CUSTOMER + ADMIN IN-APP NOTIFICATIONS
+// =====================================================
+
+Promise.allSettled([
+  notifyCustomOrderSubmitted({
+    name: `${req.user.firstName} ${req.user.lastName}`,
+    email: req.user.email,
+    phone: req.user.phone,
+    customOrderId: customOrder._id,
+  }),
+
+  createNotification({
+    io: req.app.get("io"),
+    userId: req.user._id,
+    title: "Custom order submitted",
+    message:
+      `Your custom tailoring request for ${customOrder.outfitType} ` +
+      "has been received and is pending review.",
+    type: "custom-order",
+    link: "/my-custom-orders",
+    metadata: {
+      customOrderId: String(customOrder._id),
+    },
+  }),
+
+  notifyAdmins({
+    io: req.app.get("io"),
+    title: "New custom order received",
+    message:
+      `${req.user.firstName} ${req.user.lastName} submitted a ` +
+      `custom order for ${customOrder.outfitType}.`,
+    type: "custom-order",
+    link: "/admin/custom-orders",
+    metadata: {
+      customOrderId: String(customOrder._id),
+      customerId: String(req.user._id),
+      customerName:
+        `${req.user.firstName} ${req.user.lastName}`,
+    },
+  }),
+]).then((results) => {
+  console.log(
+    "ABS CUT custom order submission notification results:",
+    results
+  );
+});
 
     return res.status(201).json({
       success: true,

@@ -10,14 +10,18 @@ const { notifyWelcome } = require("../services/notificationService");
 const { issueEmailOtp } = require("../services/emailOtpService");
 const { hashOtp } = require("../services/emailVerificationService");
 
-// =====================================================
-// REGISTER USER
-// POST /api/auth/register
-// =====================================================
 
 const registerUser = async (req, res) => {
   try {
-    const { firstName, lastName, email, phone, password } = req.body;
+    const {
+      firstName,
+      lastName,
+      username,
+      email,
+      phone,
+      password,
+      avatar,
+    } = req.body;
 
     if (
       !firstName?.trim() ||
@@ -41,12 +45,28 @@ const registerUser = async (req, res) => {
 
     const normalizedEmail = email.trim().toLowerCase();
 
-    let user = await User.findOne({ email: normalizedEmail });
+    let user = await User.findOne({
+      email: normalizedEmail,
+    });
 
-    // Allow an existing, unverified registration to request
-    // verification again instead of creating a duplicate.
+    // =====================================================
+    // EXISTING ACCOUNT
+    // =====================================================
+
     if (user) {
       if (!user.emailVerified) {
+        // Update optional profile details on an unverified account.
+        if (typeof username === "string") {
+          user.username = username.trim()
+            ? username.trim().toLowerCase()
+            : undefined;
+        }
+
+        if (typeof avatar === "string") {
+          user.avatar = avatar.trim();
+        }
+
+        await user.save();
         await issueEmailOtp(user);
 
         return res.status(200).json({
@@ -63,19 +83,52 @@ const registerUser = async (req, res) => {
       });
     }
 
+    // =====================================================
+    // CREATE NEW ACCOUNT
+    // =====================================================
+
     const hashedPassword = await bcrypt.hash(password, 12);
 
-    user = await User.create({
+    const userData = {
       firstName: firstName.trim(),
       lastName: lastName.trim(),
       email: normalizedEmail,
       phone: phone.trim(),
       password: hashedPassword,
+
+      username:
+        typeof username === "string" && username.trim()
+          ? username.trim().toLowerCase()
+          : undefined,
+
+      avatar:
+        typeof avatar === "string"
+          ? avatar.trim()
+          : "",
+
       role: "customer",
       emailVerified: false,
-    });
+    };
 
-    // Do not issue a login token before email verification.
+    try {
+      user = await User.create(userData);
+    } catch (createError) {
+      // Retry with an automatically generated username
+      // if a simultaneous registration causes a collision.
+      if (
+        createError.code === 11000 &&
+        createError.keyPattern?.username
+      ) {
+        user = await User.create({
+          ...userData,
+          username: undefined,
+        });
+      } else {
+        throw createError;
+      }
+    }
+
+    // Send OTP before allowing login.
     await issueEmailOtp(user);
 
     return res.status(201).json({
@@ -95,10 +148,17 @@ const registerUser = async (req, res) => {
     }
 
     if (error.code === 11000) {
+      const duplicateField = Object.keys(
+        error.keyPattern || {},
+      )[0];
+
       return res.status(409).json({
         success: false,
-        message: "An account with this email already exists.",
-      });
+        message:
+          duplicateField === "username"
+            ? "This username is already taken. Please choose another."
+            : "An account with this email already exists.",
+      })
     }
 
     return res.status(500).json({
@@ -108,10 +168,6 @@ const registerUser = async (req, res) => {
   }
 };
 
-// =====================================================
-// LOGIN USER
-// POST /api/auth/login
-// =====================================================
 
 const loginUser = async (req, res) => {
   try {
@@ -128,16 +184,7 @@ const loginUser = async (req, res) => {
 
     const user = await User.findOne({ email: normalizedEmail });
 
-    console.log("========== ABS CUT LOGIN DEBUG ==========");
-console.log("Email entered:", normalizedEmail);
-console.log("User found:", Boolean(user));
-console.log("Auth provider:", user?.authProvider);
-console.log("Has password:", Boolean(user?.password));
-console.log("Email verified:", user?.emailVerified);
-console.log("=========================================");
 
-    // Avoid comparing a password against undefined for
-    // accounts created through Google or Facebook.
     if (!user || !user.password) {
       return res.status(401).json({
         success: false,
@@ -162,7 +209,10 @@ console.log("=========================================");
         message: "Please verify your email before logging in.",
       });
     }
-
+// Generate a username for older accounts that do not have one.
+if (!user.username) {
+  await user.save();
+}
     const token = jwt.sign(
       { userId: user._id },
       process.env.JWT_SECRET,
@@ -177,8 +227,10 @@ console.log("=========================================");
         id: user._id,
         firstName: user.firstName,
         lastName: user.lastName,
+        username: user.username,
         email: user.email,
         phone: user.phone,
+        avatar: user.avatar || "",
         role: user.role,
       },
     });

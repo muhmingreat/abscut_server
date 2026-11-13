@@ -1,18 +1,108 @@
-
 const mongoose = require("mongoose");
 
 const Order = require("../models/Order");
 const Cart = require("../models/Cart");
 const Product = require("../models/Product");
 const InventoryMovement = require("../models/InventoryMovement");
-
+const DeliveryZone = require("../models/DeliveryZone");
 const {
   notifyOrderPlaced,
 } = require("../services/notificationService");
 
+
 // =========================================================
 // CREATE ORDER
 // =========================================================
+
+const normalizeLocation = (value = "") =>
+  String(value).trim().toLowerCase().replace(/\s+/g, " ");
+
+const escapeRegex = (value = "") =>
+  String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+
+// =========================================================
+// REMOVE PRIVATE DIGITAL STORAGE KEYS FROM CUSTOMER DATA
+// =========================================================
+
+const sanitizeOrderForCustomer = (orderDocument) => {
+  if (!orderDocument) return null;
+
+  const order = orderDocument.toObject
+    ? orderDocument.toObject()
+    : { ...orderDocument };
+
+  order.items = (order.items || []).map((item) => {
+    const safeItem = { ...item };
+
+    // Remove private storage keys from order digital files.
+    safeItem.digitalFiles = (
+      safeItem.digitalFiles || []
+    ).map((file) => {
+      const safeFile = { ...file };
+      delete safeFile.storageKey;
+      return safeFile;
+    });
+
+    // Also remove storage keys from populated product data.
+    if (
+      safeItem.product &&
+      typeof safeItem.product === "object"
+    ) {
+      safeItem.product = { ...safeItem.product };
+
+      safeItem.product.digitalFiles = (
+        safeItem.product.digitalFiles || []
+      ).map((file) => {
+        const safeFile = { ...file };
+        delete safeFile.storageKey;
+        return safeFile;
+      });
+    }
+
+    return safeItem;
+  });
+
+  return order;
+};
+
+
+const getMatchingDeliveryZone = async ({
+  state,
+  city,
+  area,
+}) => {
+  const zones = await DeliveryZone.find({
+    active: true,
+    state: {
+      $regex: `^${escapeRegex(state.trim())}$`,
+      $options: "i",
+    },
+    city: {
+      $regex: `^${escapeRegex(city.trim())}$`,
+      $options: "i",
+    },
+  });
+
+  const normalizedArea = normalizeLocation(area);
+
+  // Specific area zones take priority.
+  if (normalizedArea) {
+    const areaZone = zones.find((zone) =>
+      zone.areas.some(
+        (zoneArea) =>
+          normalizeLocation(zoneArea) === normalizedArea
+      )
+    );
+
+    if (areaZone) return areaZone;
+  }
+
+  // Fall back to a city-wide zone.
+  return zones.find((zone) => zone.areas.length === 0) || null;
+};
+
+
 
 const createOrder = async (req, res) => {
   const session = await mongoose.startSession();
@@ -27,63 +117,28 @@ const createOrder = async (req, res) => {
       notes,
     } = req.body;
 
-    // ---------------------------------------------------
-    // VALIDATE CUSTOMER
-    // ---------------------------------------------------
+    // ===================================================
+    // CUSTOMER VALIDATION
+    // ===================================================
 
     if (
       !customer ||
-      !customer.firstName ||
-      !customer.lastName ||
-      !customer.phone ||
-      !customer.email
+      !customer.firstName?.trim() ||
+      !customer.lastName?.trim() ||
+      !customer.phone?.trim() ||
+      !customer.email?.trim()
     ) {
       await session.abortTransaction();
 
       return res.status(400).json({
         success: false,
-        message:
-          "Please provide all required customer information.",
+        message: "Please provide all required customer information.",
       });
     }
 
-    // ---------------------------------------------------
-    // VALIDATE DELIVERY METHOD
-    // ---------------------------------------------------
-
-    if (!["delivery", "pickup"].includes(deliveryMethod)) {
-      await session.abortTransaction();
-
-      return res.status(400).json({
-        success: false,
-        message: "Please select a valid delivery method.",
-      });
-    }
-
-    // ---------------------------------------------------
-    // VALIDATE DELIVERY ADDRESS
-    // ---------------------------------------------------
-
-    if (deliveryMethod === "delivery") {
-      if (
-        !shippingAddress ||
-        !shippingAddress.address ||
-        !shippingAddress.city ||
-        !shippingAddress.state
-      ) {
-        await session.abortTransaction();
-
-        return res.status(400).json({
-          success: false,
-          message:
-            "Please provide your complete delivery address.",
-        });
-      }
-    }
-
-    // ---------------------------------------------------
-    // GET CUSTOMER CART
-    // ---------------------------------------------------
+    // ===================================================
+    // GET CART
+    // ===================================================
 
     const cart = await Cart.findOne({
       user: req.user._id,
@@ -100,93 +155,323 @@ const createOrder = async (req, res) => {
       });
     }
 
-    // ---------------------------------------------------
+    // ===================================================
     // PREPARE ORDER ITEMS
-    // ---------------------------------------------------
+    // ===================================================
 
     const orderItems = [];
 
     let subtotal = 0;
+    let hasPhysicalItems = false;
+    let hasDigitalItems = false;
 
     for (const cartItem of cart.items) {
       const product = cartItem.product;
-
-      // -----------------------------------------------
-      // CHECK PRODUCT AVAILABILITY
-      // -----------------------------------------------
 
       if (!product || !product.active) {
         await session.abortTransaction();
 
         return res.status(400).json({
           success: false,
-          message:
-            "One or more products in your cart are no longer available.",
+          message: "One or more products are unavailable.",
         });
       }
 
+      const purchaseMode =
+        cartItem.purchaseMode || "physical";
+
+      const productType =
+        product.productType || "ready_to_wear";
+
+      const priceUnit =
+        cartItem.priceUnit ||
+        (productType === "raw_material"
+          ? "yard"
+          : product.priceUnit || "piece");
+
+      const quantity = Number(cartItem.quantity);
+
       // -----------------------------------------------
-      // CHECK AVAILABLE STOCK
+      // VALIDATE QUANTITY
       // -----------------------------------------------
 
-      if (product.stock < cartItem.quantity) {
+      if (
+        !Number.isFinite(quantity) ||
+        quantity <= 0
+      ) {
         await session.abortTransaction();
 
         return res.status(400).json({
           success: false,
-          message: `${product.name} does not have enough stock available.`,
+          message: `Invalid quantity for ${product.name}.`,
         });
       }
 
       // -----------------------------------------------
-      // CALCULATE ITEM TOTAL
+      // DIGITAL PURCHASE
       // -----------------------------------------------
 
-      const itemTotal =
-        product.price * cartItem.quantity;
+      if (purchaseMode === "digital") {
+        if (!product.digitalAvailable) {
+          await session.abortTransaction();
 
-      subtotal += itemTotal;
+          return res.status(400).json({
+            success: false,
+            message: `${product.name} is not available digitally.`,
+          });
+        }
+
+        const digitalFiles =
+          product.digitalFiles || [];
+
+        if (digitalFiles.length === 0) {
+          await session.abortTransaction();
+
+          return res.status(400).json({
+            success: false,
+            message: `${product.name} has no digital files available.`,
+          });
+        }
+
+        const price = Number(product.digitalPrice);
+
+        if (!Number.isFinite(price) || price < 0) {
+          await session.abortTransaction();
+
+          return res.status(400).json({
+            success: false,
+            message: `Invalid digital price for ${product.name}.`,
+          });
+        }
+
+        const itemTotal = price * quantity;
+
+        subtotal += itemTotal;
+        hasDigitalItems = true;
+
+        orderItems.push({
+          product: product._id,
+          name: product.name,
+          image: product.image || "",
+          video: product.video || "",
+          productType,
+          purchaseMode,
+          priceUnit: "design",
+          price,
+          quantity,
+          digitalFiles,
+        });
+
+        continue;
+      }
 
       // -----------------------------------------------
-      // ADD ITEM TO ORDER
+      // PHYSICAL PURCHASE
       // -----------------------------------------------
+
+      if (purchaseMode !== "physical") {
+        await session.abortTransaction();
+
+        return res.status(400).json({
+          success: false,
+          message: "Invalid purchase mode.",
+        });
+      }
+
+      if (!product.physicalAvailable) {
+        await session.abortTransaction();
+
+        return res.status(400).json({
+          success: false,
+          message: `${product.name} is not available physically.`,
+        });
+      }
+
+      hasPhysicalItems = true;
+
+      // -----------------------------------------------
+      // PRICE
+      // -----------------------------------------------
+
+      const price =
+        product.physicalPrice != null
+          ? Number(product.physicalPrice)
+          : Number(product.price);
+
+      if (!Number.isFinite(price) || price < 0) {
+        await session.abortTransaction();
+
+        return res.status(400).json({
+          success: false,
+          message: `Invalid physical price for ${product.name}.`,
+        });
+      }
+
+      // -----------------------------------------------
+      // STOCK
+      // -----------------------------------------------
+
+      if (productType === "raw_material") {
+        const availableYards =
+          Number(product.stockInYards || 0);
+
+        if (
+          Math.round(quantity * 2) !== quantity * 2 ||
+          quantity < 0.5 ||
+          availableYards < quantity
+        ) {
+          await session.abortTransaction();
+
+          return res.status(400).json({
+            success: false,
+            message: `Insufficient fabric yardage for ${product.name}.`,
+          });
+        }
+      } else {
+        if (
+          !Number.isInteger(quantity) ||
+          quantity < 1 ||
+          Number(product.stock || 0) < quantity
+        ) {
+          await session.abortTransaction();
+
+          return res.status(400).json({
+            success: false,
+            message: `Insufficient stock for ${product.name}.`,
+          });
+        }
+      }
+
+      subtotal += price * quantity;
 
       orderItems.push({
         product: product._id,
         name: product.name,
         image: product.image || "",
         video: product.video || "",
-        price: product.price,
-        quantity: cartItem.quantity,
+        productType,
+        purchaseMode,
+        priceUnit,
+        price,
+        quantity,
+        digitalFiles: [],
       });
     }
 
-    // ---------------------------------------------------
-    // DELIVERY FEE
-    // ---------------------------------------------------
+    // ===================================================
+    // DELIVERY
+    // ===================================================
 
-    const deliveryFee = 0;
+    let finalDeliveryMethod = "digital";
+    let deliveryFee = 0;
+    let deliveryZone = null;
 
-    // ---------------------------------------------------
-    // FINAL TOTAL
-    // ---------------------------------------------------
+    const cleanText = (value) =>
+      typeof value === "string"
+        ? value.trim()
+        : "";
+
+    const normalizedShippingAddress = {
+      address: cleanText(shippingAddress?.address),
+      city: cleanText(shippingAddress?.city),
+      state: cleanText(shippingAddress?.state),
+      area: cleanText(shippingAddress?.area),
+      landmark: cleanText(shippingAddress?.landmark),
+    };
+
+    if (hasPhysicalItems) {
+      if (!["delivery", "pickup"].includes(deliveryMethod)) {
+        await session.abortTransaction();
+
+        return res.status(400).json({
+          success: false,
+          message: "Please select delivery or pickup.",
+        });
+      }
+
+      finalDeliveryMethod = deliveryMethod;
+
+      // -----------------------------------------------
+      // DELIVERY
+      // -----------------------------------------------
+
+      if (deliveryMethod === "delivery") {
+        const { state, city, address, area } =
+          normalizedShippingAddress;
+
+        if (!state || !city || !address) {
+          await session.abortTransaction();
+
+          return res.status(400).json({
+            success: false,
+            message: "Complete delivery address is required.",
+          });
+        }
+
+        // Check whether every physical product
+        // supports delivery.
+        const physicalProducts = cart.items
+          .filter(
+            (item) =>
+              (item.purchaseMode || "physical") ===
+              "physical",
+          )
+          .map((item) => item.product);
+
+        const deliveryUnavailable =
+          physicalProducts.some(
+            (product) =>
+              product &&
+              product.deliveryAvailable === false,
+          );
+
+        if (deliveryUnavailable) {
+          await session.abortTransaction();
+
+          return res.status(400).json({
+            success: false,
+            message:
+              "One or more physical products are not available for delivery. Please choose pickup.",
+          });
+        }
+
+        deliveryZone = await getMatchingDeliveryZone({
+          state,
+          city,
+          area,
+        });
+
+        if (!deliveryZone) {
+          await session.abortTransaction();
+
+          return res.status(422).json({
+            success: false,
+            deliveryAvailable: false,
+            requiresManualQuote: true,
+            message:
+              "We cannot automatically calculate delivery for this location. Please contact ABS CUT for a delivery quotation.",
+          });
+        }
+
+        deliveryFee = Number(deliveryZone.fee || 0);
+      }
+    }
+
+    // ===================================================
+    // TOTAL
+    // ===================================================
 
     const total = subtotal + deliveryFee;
 
-    // ---------------------------------------------------
+    // ===================================================
     // CREATE ORDER
-    // ---------------------------------------------------
+    // ===================================================
 
     const createdOrders = await Order.create(
       [
         {
           user: req.user._id,
-
           items: orderItems,
-
-          // -----------------------------------------
-          // CUSTOMER
-          // -----------------------------------------
 
           customer: {
             firstName: customer.firstName.trim(),
@@ -195,182 +480,192 @@ const createOrder = async (req, res) => {
             email: customer.email.toLowerCase().trim(),
           },
 
-          // -----------------------------------------
-          // SHIPPING ADDRESS
-          // -----------------------------------------
+          shippingAddress: normalizedShippingAddress,
 
-          shippingAddress: {
-            address: shippingAddress?.address?.trim() || "",
-            city: shippingAddress?.city?.trim() || "",
-            state: shippingAddress?.state?.trim() || "",
-          },
+          deliveryMethod: finalDeliveryMethod,
+          deliveryFee,
 
-          // -----------------------------------------
-          // DELIVERY
-          // -----------------------------------------
+          deliveryZone: deliveryZone?._id || null,
+          deliveryZoneName: deliveryZone?.name || "",
 
-          deliveryMethod,
-
-          // -----------------------------------------
-          // NOTES
-          // -----------------------------------------
-
-          notes: notes?.trim() || "",
-
-          // -----------------------------------------
-          // PRICING
-          // -----------------------------------------
+          notes: cleanText(notes),
 
           subtotal,
-          deliveryFee,
           total,
 
-          // -----------------------------------------
-          // PAYMENT
-          // -----------------------------------------
-
           paymentStatus: "pending",
-
-          // -----------------------------------------
-          // ORDER STATUS
-          // -----------------------------------------
-
           orderStatus: "pending",
         },
       ],
-      { session }
+      { session },
     );
-
-    // ---------------------------------------------------
-    // GET CREATED ORDER
-    // ---------------------------------------------------
 
     const createdOrder = createdOrders[0];
 
-    // ---------------------------------------------------
-    // DEDUCT STOCK AND RECORD INVENTORY HISTORY
-    // IMPORTANT: STOCK IS DEDUCTED ONLY ONCE.
-    // ---------------------------------------------------
+    // ===================================================
+    // STOCK DEDUCTION
+    // PHYSICAL ITEMS ONLY
+    // ===================================================
 
     for (const cartItem of cart.items) {
       const product = cartItem.product;
+
+      if (
+        !product ||
+        (cartItem.purchaseMode || "physical") !==
+          "physical"
+      ) {
+        continue;
+      }
+
       const quantity = Number(cartItem.quantity);
 
       // -----------------------------------------------
-      // ATOMIC STOCK DEDUCTION
+      // RAW MATERIAL: YARDS
       // -----------------------------------------------
 
-      const updatedProduct = await Product.findOneAndUpdate(
-        {
-          _id: product._id,
-          active: true,
-          stock: { $gte: quantity },
-        },
-        {
-          $inc: {
-            stock: -quantity,
-          },
-        },
-        {
-          new: true,
-          session,
+      if (product.productType === "raw_material") {
+        const updatedProduct =
+          await Product.findOneAndUpdate(
+            {
+              _id: product._id,
+              active: true,
+              stockInYards: { $gte: quantity },
+            },
+            {
+              $inc: {
+                stockInYards: -quantity,
+              },
+            },
+            {
+              new: true,
+              session,
+            },
+          );
+
+        if (!updatedProduct) {
+          await session.abortTransaction();
+
+          return res.status(400).json({
+            success: false,
+            message:
+              `Unable to reserve fabric yardage for ${product.name}.`,
+          });
         }
-      );
+
+        await InventoryMovement.create(
+          [
+            {
+              product: updatedProduct._id,
+              type: "sale",
+              quantityChange: -quantity,
+              stockBefore:
+                updatedProduct.stockInYards + quantity,
+              stockAfter:
+                updatedProduct.stockInYards,
+              order: createdOrder._id,
+              performedBy: req.user._id,
+              reason:
+                "Fabric yardage deducted for a newly created order.",
+            },
+          ],
+          { session },
+        );
+
+        continue;
+      }
 
       // -----------------------------------------------
-      // HANDLE INSUFFICIENT STOCK
+      // OTHER PHYSICAL PRODUCTS: PIECES
       // -----------------------------------------------
+
+      const updatedProduct =
+        await Product.findOneAndUpdate(
+          {
+            _id: product._id,
+            active: true,
+            stock: { $gte: quantity },
+          },
+          {
+            $inc: {
+              stock: -quantity,
+            },
+          },
+          {
+            new: true,
+            session,
+          },
+        );
 
       if (!updatedProduct) {
         await session.abortTransaction();
 
         return res.status(400).json({
           success: false,
-          message: `Unable to reserve stock for ${product.name}. Please try again.`,
+          message:
+            `Unable to reserve stock for ${product.name}.`,
         });
       }
-
-      // -----------------------------------------------
-      // RECORD INVENTORY MOVEMENT
-      // -----------------------------------------------
 
       await InventoryMovement.create(
         [
           {
             product: updatedProduct._id,
-
             type: "sale",
-
             quantityChange: -quantity,
-
-            stockBefore: updatedProduct.stock + quantity,
-
+            stockBefore:
+              updatedProduct.stock + quantity,
             stockAfter: updatedProduct.stock,
-
             order: createdOrder._id,
-
             performedBy: req.user._id,
-
-            reason: "Stock deducted for a newly created order.",
+            reason:
+              "Stock deducted for a newly created order.",
           },
         ],
-        { session }
+        { session },
       );
     }
 
-    // ---------------------------------------------------
-    // CLEAR CUSTOMER CART
-    // ---------------------------------------------------
+    // ===================================================
+    // CLEAR CART
+    // ===================================================
 
     cart.items = [];
 
     await cart.save({ session });
 
-    // ---------------------------------------------------
-    // COMMIT TRANSACTION
-    // ---------------------------------------------------
+    // ===================================================
+    // COMMIT
+    // ===================================================
 
     await session.commitTransaction();
 
-    // ---------------------------------------------------
-    // SEND ORDER RECEIVED NOTIFICATIONS
-    // Runs AFTER the transaction commits.
-    // Notification failure does not undo the order.
-    // ---------------------------------------------------
+    // ===================================================
+    // NOTIFICATIONS
+    // ===================================================
 
     Promise.allSettled([
       notifyOrderPlaced({
-        name: `${createdOrder.customer.firstName} ${createdOrder.customer.lastName}`,
-
+        name:
+          `${createdOrder.customer.firstName} ${createdOrder.customer.lastName}`,
         email: createdOrder.customer.email,
-
         phone: createdOrder.customer.phone,
-
         orderId: createdOrder._id,
-
         total: createdOrder.total,
       }),
     ]).then((results) => {
       console.log(
         "ABS CUT order notification results:",
-        results
+        results,
       );
     });
-
-    // ---------------------------------------------------
-    // RESPONSE
-    // ---------------------------------------------------
 
     return res.status(201).json({
       success: true,
       message: "Order created successfully.",
-      order: createdOrder,
+      order: sanitizeOrderForCustomer(createdOrder),
     });
   } catch (error) {
-    // -----------------------------------------------
-    // ROLL BACK IF TRANSACTION IS STILL ACTIVE
-    // -----------------------------------------------
-
     try {
       if (session.inTransaction()) {
         await session.abortTransaction();
@@ -378,7 +673,7 @@ const createOrder = async (req, res) => {
     } catch (abortError) {
       console.error(
         "Transaction abort error:",
-        abortError
+        abortError,
       );
     }
 
@@ -389,13 +684,11 @@ const createOrder = async (req, res) => {
       message: "Unable to create your order.",
     });
   } finally {
-    // -----------------------------------------------
-    // CLOSE DATABASE SESSION
-    // -----------------------------------------------
-
     await session.endSession();
   }
 };
+
+
 
 // =========================================================
 // GET MY ORDERS
@@ -403,16 +696,29 @@ const createOrder = async (req, res) => {
 
 const getMyOrders = async (req, res) => {
   try {
+    if (!req.user?._id) {
+      return res.status(401).json({
+        success: false,
+        message: "Authentication required.",
+      })
+    }
+
     const orders = await Order.find({
       user: req.user._id,
-    }).sort({
-      createdAt: -1,
-    });
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    // Remove private digital storage keys before
+    // returning customer order information.
+    const safeOrders = orders.map((order) =>
+      sanitizeOrderForCustomer(order)
+    );
 
     return res.status(200).json({
       success: true,
-      count: orders.length,
-      orders,
+      count: safeOrders.length,
+      orders: safeOrders,
     });
   } catch (error) {
     console.error("Get my orders error:", error);
@@ -420,9 +726,10 @@ const getMyOrders = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Unable to load your orders.",
-    });
+    })
   }
 };
+
 
 // =========================================================
 // GET SINGLE ORDER
@@ -444,7 +751,7 @@ const getOrderById = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      order,
+        order: sanitizeOrderForCustomer(order)
     });
   } catch (error) {
     console.error("Get order error:", error);
@@ -494,7 +801,8 @@ const getReceiptById = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      receipt: order,
+      // receipt: order,
+      receipt: sanitizeOrderForCustomer(order),
     });
   } catch (error) {
     console.error("Get receipt error:", error);
@@ -516,644 +824,3 @@ module.exports = {
   getOrderById,
   getReceiptById,
 };
-
-
-
-
-
-
-
-
-// const mongoose = require("mongoose");
-
-// const Order = require("../models/Order");
-// const Cart = require("../models/Cart");
-// const Product = require("../models/Product");
-// const InventoryMovement = require("../models/InventoryMovement");
-// const {
-//   notifyOrderPlaced,
-// } = require("../services/notificationService");
-
-// // =========================================================
-// // CREATE ORDER
-// // =========================================================
-
-// const createOrder = async (req, res) => {
-//   const session =
-//     await mongoose.startSession();
-
-//   try {
-//     session.startTransaction();
-
-//     const {
-//       customer,
-//       shippingAddress,
-//       deliveryMethod,
-//       notes,
-//     } = req.body;
-
-//     // ---------------------------------------------------
-//     // VALIDATE CUSTOMER
-//     // ---------------------------------------------------
-
-//     if (
-//       !customer ||
-//       !customer.firstName ||
-//       !customer.lastName ||
-//       !customer.phone ||
-//       !customer.email
-//     ) {
-//       await session.abortTransaction();
-
-//       return res.status(400).json({
-//         success: false,
-//         message:
-//           "Please provide all required customer information.",
-//       });
-//     }
-
-//     // ---------------------------------------------------
-//     // VALIDATE DELIVERY METHOD
-//     // ---------------------------------------------------
-
-//     if (
-//       ![
-//         "delivery",
-//         "pickup",
-//       ].includes(
-//         deliveryMethod
-//       )
-//     ) {
-//       await session.abortTransaction();
-
-//       return res.status(400).json({
-//         success: false,
-//         message:
-//           "Please select a valid delivery method.",
-//       });
-//     }
-
-//     // ---------------------------------------------------
-//     // VALIDATE DELIVERY ADDRESS
-//     // ---------------------------------------------------
-
-//     if (
-//       deliveryMethod ===
-//       "delivery"
-//     ) {
-//       if (
-//         !shippingAddress ||
-//         !shippingAddress.address ||
-//         !shippingAddress.city ||
-//         !shippingAddress.state
-//       ) {
-//         await session.abortTransaction();
-
-//         return res.status(400).json({
-//           success: false,
-//           message:
-//             "Please provide your complete delivery address.",
-//         });
-//       }
-//     }
-
-//     // ---------------------------------------------------
-//     // GET CUSTOMER CART
-//     // ---------------------------------------------------
-
-//     const cart =
-//       await Cart.findOne({
-//         user:
-//           req.user._id,
-//       })
-//         .populate(
-//           "items.product"
-//         )
-//         .session(session);
-
-//     if (
-//       !cart ||
-//       cart.items.length === 0
-//     ) {
-//       await session.abortTransaction();
-
-//       return res.status(400).json({
-//         success: false,
-//         message:
-//           "Your cart is empty.",
-//       });
-//     }
-
-//     // ---------------------------------------------------
-//     // PREPARE ORDER ITEMS
-//     // ---------------------------------------------------
-
-//     const orderItems = [];
-
-//     let subtotal = 0;
-
-//     for (
-//       const cartItem of
-//       cart.items
-//     ) {
-//       const product =
-//         cartItem.product;
-
-//       // -----------------------------------------------
-//       // CHECK PRODUCT
-//       // -----------------------------------------------
-
-//       if (
-//         !product ||
-//         !product.active
-//       ) {
-//         await session.abortTransaction();
-
-//         return res.status(400).json({
-//           success: false,
-//           message:
-//             "One or more products in your cart are no longer available.",
-//         });
-//       }
-
-//       // -----------------------------------------------
-//       // CHECK STOCK
-//       // -----------------------------------------------
-
-//       if (
-//         product.stock <
-//         cartItem.quantity
-//       ) {
-//         await session.abortTransaction();
-
-//         return res.status(400).json({
-//           success: false,
-//           message:
-//             `${product.name} does not have enough stock available.`,
-//         });
-//       }
-
-//       // -----------------------------------------------
-//       // CALCULATE ITEM TOTAL
-//       // -----------------------------------------------
-
-//       const itemTotal =
-//         product.price *
-//         cartItem.quantity;
-
-//       subtotal +=
-//         itemTotal;
-
-//       // -----------------------------------------------
-//       // ADD ITEM
-//       // -----------------------------------------------
-
-//       orderItems.push({
-//         product:
-//           product._id,
-
-//         name:
-//           product.name,
-
-//         image:
-//           product.image,
-
-//         price:
-//           product.price,
-
-//         quantity:
-//           cartItem.quantity,
-//       });
-//     }
-
-//     // ---------------------------------------------------
-//     // DELIVERY FEE
-//     // ---------------------------------------------------
-
-//     const deliveryFee = 0;
-
-//     // ---------------------------------------------------
-//     // FINAL TOTAL
-//     // ---------------------------------------------------
-
-//     const total =
-//       subtotal +
-//       deliveryFee;
-
-//     // ---------------------------------------------------
-//     // REDUCE PRODUCT STOCK
-//     // ---------------------------------------------------
-
-//     for (
-//       const cartItem of
-//       cart.items
-//     ) {
-//       const product =
-//         cartItem.product;
-
-//       const updatedProduct =
-//         await Product.findOneAndUpdate(
-//           {
-//             _id:
-//               product._id,
-
-//             active:
-//               true,
-
-//             stock: {
-//               $gte:
-//                 cartItem.quantity,
-//             },
-//           },
-
-//           {
-//             $inc: {
-//               stock:
-//                 -cartItem.quantity,
-//             },
-//           },
-
-//           {
-//             new:
-//               true,
-
-//             session,
-//           }
-//         );
-
-//       if (
-//         !updatedProduct
-//       ) {
-//         await session.abortTransaction();
-
-//         return res.status(400).json({
-//           success: false,
-//           message:
-//             `Unable to reserve stock for ${product.name}. Please try again.`,
-//         });
-//       }
-//     }
-
-//     // ---------------------------------------------------
-//     // CREATE ORDER
-//     // ---------------------------------------------------
-
-//     const createdOrders =
-//       await Order.create(
-//         [
-//           {
-//             user:
-//               req.user._id,
-
-//             items:
-//               orderItems,
-
-//             // -----------------------------------------
-//             // CUSTOMER
-//             // -----------------------------------------
-
-//             customer: {
-//               firstName:
-//                 customer.firstName.trim(),
-
-//               lastName:
-//                 customer.lastName.trim(),
-
-//               phone:
-//                 customer.phone.trim(),
-
-//               email:
-//                 customer.email
-//                   .toLowerCase()
-//                   .trim(),
-//             },
-
-//             // -----------------------------------------
-//             // SHIPPING ADDRESS
-//             // -----------------------------------------
-
-//             shippingAddress: {
-//               address:
-//                 shippingAddress?.address
-//                   ?.trim() || "",
-
-//               city:
-//                 shippingAddress?.city
-//                   ?.trim() || "",
-
-//               state:
-//                 shippingAddress?.state
-//                   ?.trim() || "",
-//             },
-
-//             // -----------------------------------------
-//             // DELIVERY
-//             // -----------------------------------------
-
-//             deliveryMethod:
-//               deliveryMethod,
-
-//             // -----------------------------------------
-//             // NOTES
-//             // -----------------------------------------
-
-//             notes:
-//               notes?.trim() || "",
-
-//             // -----------------------------------------
-//             // PRICING
-//             // -----------------------------------------
-
-//             subtotal:
-//               subtotal,
-
-//             deliveryFee:
-//               deliveryFee,
-
-//             total:
-//               total,
-
-//             // -----------------------------------------
-//             // PAYMENT
-//             // -----------------------------------------
-
-//             paymentStatus:
-//               "pending",
-
-//             // -----------------------------------------
-//             // ORDER STATUS
-//             // -----------------------------------------
-
-//             orderStatus:
-//               "pending",
-//           },
-//         ],
-
-//         {
-//           session,
-//         }
-//       );
-
-//     // ---------------------------------------------------
-//     // CLEAR CART
-//     // ---------------------------------------------------
-
-//     cart.items = [];
-
-//     await cart.save({
-//       session,
-//     });
-
-//     // ---------------------------------------------------
-//     // COMPLETE TRANSACTION
-//     // ---------------------------------------------------
-
-//     await session.commitTransaction();
-
-//     const createdOrder =
-//       createdOrders[0];
-
-//     // ===================================================
-//     // SEND ORDER RECEIVED EMAIL + SMS
-//     // ===================================================
-//     //
-//     // This happens AFTER commit.
-//     //
-//     // Therefore:
-//     //
-//     // Database success
-//     //        ↓
-//     // Transaction committed
-//     //        ↓
-//     // Notification attempted
-//     //
-//     // Email/SMS failure cannot undo the order.
-//     //
-//     // ===================================================
-
-//     Promise.allSettled([
-//       notifyOrderPlaced({
-//         name:
-//           `${createdOrder.customer.firstName} ${createdOrder.customer.lastName}`,
-
-//         email:
-//           createdOrder.customer.email,
-
-//         phone:
-//           createdOrder.customer.phone,
-
-//         orderId:
-//           createdOrder._id,
-
-//         total:
-//           createdOrder.total,
-//       }),
-//     ]).then((results) => {
-//       console.log(
-//         "ABS CUT order notification results:",
-//         results
-//       );
-//     });
-
-//     // ---------------------------------------------------
-//     // RESPONSE
-//     // ---------------------------------------------------
-
-//     return res.status(201).json({
-//       success: true,
-
-//       message:
-//         "Order created successfully.",
-
-//       order:
-//         createdOrder,
-//     });
-
-//   } catch (error) {
-//     try {
-//       await session.abortTransaction();
-//     } catch (abortError) {
-//       console.error(
-//         "Transaction abort error:",
-//         abortError
-//       );
-//     }
-
-//     console.error(
-//       "Create order error:",
-//       error
-//     );
-
-//     return res.status(500).json({
-//       success: false,
-//       message:
-//         "Unable to create your order.",
-//     });
-
-//   } finally {
-//     await session.endSession();
-//   }
-// };
-
-
-// // =========================================================
-// // GET MY ORDERS
-// // =========================================================
-
-// const getMyOrders =
-//   async (req, res) => {
-//     try {
-//       const orders =
-//         await Order.find({
-//           user:
-//             req.user._id,
-//         }).sort({
-//           createdAt:
-//             -1,
-//         });
-
-//       return res.status(200).json({
-//         success: true,
-//         count:
-//           orders.length,
-//         orders,
-//       });
-
-//     } catch (error) {
-//       console.error(
-//         "Get my orders error:",
-//         error
-//       );
-
-//       return res.status(500).json({
-//         success: false,
-//         message:
-//           "Unable to load your orders.",
-//       });
-//     }
-//   };
-
-
-// // =========================================================
-// // GET SINGLE ORDER
-// // =========================================================
-
-// const getOrderById =
-//   async (req, res) => {
-//     try {
-//       const order =
-//         await Order.findOne({
-//           _id:
-//             req.params.id,
-
-//           user:
-//             req.user._id,
-//         });
-
-//       if (!order) {
-//         return res.status(404).json({
-//           success: false,
-//           message:
-//             "Order not found.",
-//         });
-//       }
-
-//       return res.status(200).json({
-//         success: true,
-//         order,
-//       });
-
-//     } catch (error) {
-//       console.error(
-//         "Get order error:",
-//         error
-//       );
-
-//       return res.status(500).json({
-//         success: false,
-//         message:
-//           "Unable to load this order.",
-//       });
-//     }
-//   };
-
-
-// // =========================================================
-// // GET SECURE RECEIPT
-// // Receipt is available ONLY after successful payment
-// // =========================================================
-
-// const getReceiptById =
-//   async (req, res) => {
-//     try {
-//       const {
-//         id,
-//       } = req.params;
-
-//       const order =
-//         await Order.findOne({
-//           _id:
-//             id,
-
-//           user:
-//             req.user._id,
-//         }).populate(
-//           "items.product"
-//         );
-
-//       if (!order) {
-//         return res.status(404).json({
-//           success: false,
-//           message:
-//             "Order not found.",
-//         });
-//       }
-
-//       // -----------------------------------------------
-//       // RECEIPT SECURITY
-//       // -----------------------------------------------
-
-//       if (
-//         order.paymentStatus !==
-//           "paid" ||
-//         order.orderStatus !==
-//           "confirmed"
-//       ) {
-//         return res.status(403).json({
-//           success: false,
-//           message:
-//             "Receipt is only available after successful payment.",
-//         });
-//       }
-
-//       return res.status(200).json({
-//         success: true,
-//         receipt:
-//           order,
-//       });
-
-//     } catch (error) {
-//       console.error(
-//         "Get receipt error:",
-//         error
-//       );
-
-//       return res.status(500).json({
-//         success: false,
-//         message:
-//           "Unable to retrieve receipt.",
-//       });
-//     }
-//   };
-
-
-// // =========================================================
-// // EXPORTS
-// // =========================================================
-
-// module.exports = {
-//   createOrder,
-//   getMyOrders,
-//   getOrderById,
-//   getReceiptById,
-// };

@@ -3,7 +3,7 @@ const User = require("../models/User");
 
 const protect = async (req, res, next) => {
   try {
-    const authHeader = req.headers.authorization;
+    const authHeader = req.headers.authorization
 
     if (
       !authHeader ||
@@ -79,5 +79,5 @@ const adminOnly = (req, res, next) => {
   next();
 };
 
-module.exports = protect;
+module.exports = protect 
 module.exports.adminOnly = adminOnly;

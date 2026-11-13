@@ -15,6 +15,7 @@ const {
   getInventorySummary,
   getInventoryMovements,
   adjustInventoryStock,
+  getAdminStaff,
 } = require("../controllers/adminController");
 const {
   getAdminReportOverview,
@@ -102,6 +103,16 @@ router.get(
   protect,
   adminOnly,
   getAdminReportOverview
-)
+);
+// =====================================================
+// ADMIN — STAFF MANAGEMENT
+// =====================================================
+
+router.get(
+  "/staff",
+  protect,
+  adminOnly,
+  getAdminStaff
+);
 module.exports = router;
 

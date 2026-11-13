@@ -11,6 +11,8 @@ const CustomOrder = require("../models/CustomOrder");
 const Payment = require("../models/Payment");
 const CustomOrderInstallmentSettings = require("../models/CustomOrderInstallmentSettings");
 const { notifyAdminPayment } = require("../services/notificationService");
+const PartyBooking = require("../models/PartyBooking");
+const PartyBookingInstallmentSettings = require("../models/PartyBookingInstallmentSettings");
 
 // ============================================================
 // CONSTANTS
@@ -44,15 +46,6 @@ const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
 const makeReference = (prefix = "ABS-CUT") =>
   `${prefix}-${Date.now()}-${crypto.randomUUID()}`;
 
-// const getFrontendCallbackUrl = () => {
-//   const frontendUrl = process.env.FRONTEND_URL;
-
-//   if (!frontendUrl) {
-//     throw new Error("FRONTEND_URL_MISSING");
-//   }
-
-//   return `${frontendUrl.replace(/\/+$/, "")}/payments/callback`;
-// };
 const getFrontendCallbackUrl = () => {
   const frontendUrl = process.env.FRONTEND_URL;
 
@@ -81,6 +74,44 @@ const sendError = (res, error, fallbackMessage) => {
     PAYSTACK_CHECKOUT_URL_MISSING: [
       502,
       "Paystack did not return a checkout link. Please try again.",
+    ],
+    BANK_TRANSFER_AMOUNT_REQUIRED: [400, "Enter the exact amount transferred."],
+
+    BANK_TRANSFER_AMOUNT_MISMATCH: [
+      400,
+      "The transfer amount must exactly match the amount due for this payment.",
+    ],
+
+    BANK_TRANSFER_DATE_REQUIRED: [
+      400,
+      "Enter the date and time of the bank transfer.",
+    ],
+
+    BANK_TRANSFER_DATE_INVALID: [
+      400,
+      "The transfer date and time are invalid or in the future.",
+    ],
+    FLUTTERWAVE_CHECKOUT_URL_MISSING: [
+      502,
+      "Flutterwave did not return a checkout link. Please try again.",
+    ],
+
+    BANK_TRANSFER_RECEIPT_REQUIRED: [
+      400,
+      "Upload your bank transfer receipt before submitting.",
+    ],
+    PARTY_INSTALLMENT_PAYMENT_IN_PROGRESS: [
+      409,
+      "A payment attempt already exists for this installment. Please check your existing payment before trying again.",
+    ],
+    BANK_TRANSFER_TRANSACTION_REQUIRED: [
+      400,
+      "Enter the transaction ID shown by your bank.",
+    ],
+
+    BANK_TRANSFER_EVIDENCE_INCOMPLETE: [
+      400,
+      "This transfer cannot be reviewed because required evidence is missing.",
     ],
 
     INVALID_TRANSACTION_ID: [
@@ -173,6 +204,102 @@ const sendError = (res, error, fallbackMessage) => {
     ],
 
     INVALID_PAYMENT_PROVIDER: [400, "Unsupported payment provider."],
+    PARTY_BOOKING_NOT_FOUND: [
+      404,
+      "The party booking associated with this payment could not be found.",
+    ],
+
+    PARTY_BOOKING_NOT_PAYABLE: [
+      400,
+      "This party booking is no longer eligible for payment.",
+    ],
+
+    PARTY_QUOTATION_NOT_ACCEPTED: [
+      400,
+      "Accept the party booking quotation before making payment.",
+    ],
+
+    PARTY_INSTALLMENT_SCHEDULE_NOT_APPROVED: [
+      400,
+      "Your installment schedule must be approved before payment.",
+    ],
+
+    PARTY_PAYMENT_DEADLINE_PASSED: [
+      400,
+      "The payment deadline for this booking has passed.",
+    ],
+
+    PARTY_BOOKING_ALREADY_PAID: [
+      400,
+      "This party booking has already been fully paid.",
+    ],
+
+    PARTY_INSTALLMENT_NOT_FOUND: [
+      404,
+      "The selected installment could not be found.",
+    ],
+
+    PARTY_INSTALLMENT_ALREADY_PROCESSED: [
+      409,
+      "This installment has already been processed or is no longer payable.",
+    ],
+
+    PARTY_BOOKING_NOT_FOUND: [404, "Party booking not found."],
+
+    PARTY_BOOKING_NOT_PAYABLE: [
+      400,
+      "This party booking is no longer eligible for payment.",
+    ],
+
+    PARTY_QUOTATION_NOT_ACCEPTED: [
+      400,
+      "Accept the party booking quotation before making payment.",
+    ],
+
+    PARTY_INSTALLMENT_SCHEDULE_NOT_APPROVED: [
+      400,
+      "Your installment schedule must be approved before payment.",
+    ],
+
+    PARTY_PAYMENT_DEADLINE_PASSED: [
+      400,
+      "The payment deadline for this booking has passed.",
+    ],
+
+    PARTY_BOOKING_ALREADY_PAID: [
+      400,
+      "This party booking has already been fully paid.",
+    ],
+
+    PARTY_INSTALLMENT_NOT_FOUND: [
+      404,
+      "The selected installment could not be found.",
+    ],
+
+    PARTY_INSTALLMENT_ALREADY_PROCESSED: [
+      409,
+      "This installment has already been processed or is no longer payable.",
+    ],
+
+    PARTY_INSTALLMENT_DUE_DATE_PASSED: [
+      400,
+      "The due date for this installment has passed.",
+    ],
+
+    PARTY_INSTALLMENTS_DISABLED: [
+      400,
+      "Party booking installment payments are currently disabled.",
+    ],
+
+    PARTY_PAYMENT_METHOD_DISABLED: [
+      400,
+      "This payment method is currently disabled for party bookings.",
+    ],
+
+    CUSTOMER_EMAIL_REQUIRED: [
+      400,
+      "A valid customer email address is required for this payment method.",
+    ],
   };
 
   const known = messages[error?.message];
@@ -203,11 +330,6 @@ const getPaymentError = (message) => new Error(message);
 // ============================================================
 // INSTALLMENT SETTINGS
 // ============================================================
-
-// ============================================================
-// ADMIN PAYMENT NOTIFICATION
-// ============================================================
-
 const notifyAdminPaymentSafely = async ({
   payment,
   order: suppliedOrder = null,
@@ -220,39 +342,68 @@ const notifyAdminPaymentSafely = async ({
 
     let order = suppliedOrder;
 
+    // Retrieve the associated booking or order.
     if (!order && payment.orderId) {
-      const Model = payment.orderType === "CustomOrder" ? CustomOrder : Order;
+      if (payment.orderType === "PartyBooking") {
+        order = await PartyBooking.findById(payment.orderId).populate(
+          "customer",
+          "firstName lastName name email",
+        );
+      } else {
+        const Model = payment.orderType === "CustomOrder" ? CustomOrder : Order;
 
-      order = await Model.findById(payment.orderId).populate(
-        "user",
-        "firstName lastName email",
-      );
+        order = await Model.findById(payment.orderId).populate(
+          "user",
+          "firstName lastName name email",
+        );
+      }
     }
 
     if (!order) {
       console.warn(
-        "ABS CUT payment notification skipped: order not found.",
+        "ABS CUT payment notification skipped: associated record not found.",
         payment.reference,
       );
       return;
     }
 
-    const user = order.user || {};
+    // Party bookings use the customer reference.
+    // Ordinary and custom orders use the user reference.
+    const customer =
+      payment.orderType === "PartyBooking"
+        ? order.customer || {}
+        : order.user || {};
 
     const buyerName =
-      [user.firstName, user.lastName].filter(Boolean).join(" ").trim() ||
+      [customer.firstName, customer.lastName]
+        .filter(Boolean)
+        .join(" ")
+        .trim() ||
+      customer.name ||
+      order.contactName ||
       order.name ||
       order.customerName ||
       "Customer";
 
-    const customerEmail = getCustomerEmail(order) || user.email || "";
+    const customerEmail = customer.email || getCustomerEmail(order) || "";
+
+    const recordLabel =
+      payment.orderType === "PartyBooking"
+        ? "Party Booking"
+        : payment.orderType === "CustomOrder"
+          ? "Custom Order"
+          : "Order";
 
     await notifyAdminPayment({
       customerName: buyerName,
       customerEmail,
-      orderId: `${payment.orderType === "CustomOrder" ? "Custom Order" : "Order"} #${order._id}`,
+
+      orderId: `${recordLabel} #${order._id}`,
+
       amount: payment.amount,
+
       paymentReference: payment.reference || order.paymentReference || "",
+
       paymentMethod:
         payment.provider === "bank_transfer"
           ? "Bank Transfer"
@@ -262,12 +413,11 @@ const notifyAdminPaymentSafely = async ({
     });
 
     console.info(
-      "ABS CUT admin payment notification sent for:",
+      `ABS CUT admin payment notification sent for ${recordLabel}:`,
       payment.reference,
     );
   } catch (error) {
-    // The payment has already been processed. Do not fail it
-    // just because the notification could not be delivered.
+    // Payment processing must not fail because a notification fails.
     console.error(
       "ABS CUT admin payment notification failed:",
       error?.message || error,
@@ -310,6 +460,145 @@ const calculateMinimumDeposit = (quotation, settings) => {
   }
 
   return (Number(quotation) * Number(settings.minimumDepositValue || 0)) / 100;
+};
+
+// ============================================================
+// PARTY BOOKING PAYMENT VALIDATION
+// ============================================================
+
+const getPartyBookingInstallmentSettings = async () => {
+  return PartyBookingInstallmentSettings.findOneAndUpdate(
+    { settingsKey: "party-booking-installments" },
+    {
+      $setOnInsert: {
+        settingsKey: "party-booking-installments",
+        enabled: true,
+        minimumDepositType: "percentage",
+        minimumDepositValue: 50,
+        maxInstallments: 4,
+        customerChoosesPaymentDates: true,
+        requireFullPaymentBeforeFulfilment: true,
+        bankTransferEnabled: true,
+        paystackEnabled: true,
+        flutterwaveEnabled: true,
+      },
+    },
+    {
+      new: true,
+      upsert: true,
+      setDefaultsOnInsert: true,
+    },
+  );
+};
+
+const getPartyBookingPaymentDetails = async ({
+  bookingId,
+  installmentId,
+  userId,
+  provider,
+}) => {
+  if (
+    !bookingId ||
+    !installmentId ||
+    !mongoose.Types.ObjectId.isValid(bookingId) ||
+    !mongoose.Types.ObjectId.isValid(installmentId)
+  ) {
+    throw getPaymentError("PARTY_INSTALLMENT_NOT_FOUND");
+  }
+
+  if (!["paystack", "flutterwave", "bank_transfer"].includes(provider)) {
+    throw getPaymentError("INVALID_PAYMENT_PROVIDER");
+  }
+
+  // Retrieve the booking and the customer's email.
+  const booking = await PartyBooking.findOne({
+    _id: bookingId,
+    customer: userId,
+  }).populate("customer", "email");
+
+  if (!booking) {
+    throw getPaymentError("PARTY_BOOKING_NOT_FOUND");
+  }
+
+  if (booking.status === "cancelled" || booking.status === "completed") {
+    throw getPaymentError("PARTY_BOOKING_NOT_PAYABLE");
+  }
+
+  if (!booking.quotationAcceptedAt) {
+    throw getPaymentError("PARTY_QUOTATION_NOT_ACCEPTED");
+  }
+
+  if (booking.scheduleStatus !== "approved") {
+    throw getPaymentError("PARTY_INSTALLMENT_SCHEDULE_NOT_APPROVED");
+  }
+
+  const now = Date.now();
+
+  if (
+    booking.paymentDeadline &&
+    new Date(booking.paymentDeadline).getTime() < now
+  ) {
+    throw getPaymentError("PARTY_PAYMENT_DEADLINE_PASSED");
+  }
+
+  const installment = booking.installmentSchedule.id(installmentId);
+
+  if (!installment) {
+    throw getPaymentError("PARTY_INSTALLMENT_NOT_FOUND");
+  }
+
+  if (installment.status !== "scheduled") {
+    throw getPaymentError("PARTY_INSTALLMENT_ALREADY_PROCESSED");
+  }
+
+  if (new Date(installment.dueDate).getTime() < now) {
+    throw getPaymentError("PARTY_INSTALLMENT_DUE_DATE_PASSED");
+  }
+
+  const quotationKobo = toKobo(booking.quotationAmount || 0);
+  const amountPaidKobo = toKobo(booking.amountPaid || 0);
+  const installmentAmountKobo = toKobo(installment.amount);
+
+  const balanceKobo = quotationKobo - amountPaidKobo;
+
+  if (quotationKobo <= 0 || balanceKobo <= 0) {
+    throw getPaymentError("PARTY_BOOKING_ALREADY_PAID");
+  }
+
+  if (installmentAmountKobo <= 0 || installmentAmountKobo > balanceKobo) {
+    throw getPaymentError("PAYMENT_AMOUNT_MISMATCH");
+  }
+
+  const settings = await getPartyBookingInstallmentSettings();
+
+  if (!settings.enabled) {
+    throw getPaymentError("PARTY_INSTALLMENTS_DISABLED");
+  }
+
+  const providerEnabled = {
+    paystack: settings.paystackEnabled,
+    flutterwave: settings.flutterwaveEnabled,
+    bank_transfer: settings.bankTransferEnabled,
+  };
+
+  if (!providerEnabled[provider]) {
+    throw getPaymentError("PARTY_PAYMENT_METHOD_DISABLED");
+  }
+
+  const customerEmail = booking.customer?.email || "";
+
+  if (["paystack", "flutterwave"].includes(provider) && !customerEmail) {
+    throw getPaymentError("CUSTOMER_EMAIL_REQUIRED");
+  }
+
+  return {
+    booking,
+    installment,
+    settings,
+    amount: fromKobo(installmentAmountKobo),
+    balance: fromKobo(balanceKobo),
+    customerEmail,
+  };
 };
 
 /**
@@ -717,7 +1006,6 @@ const verifyPayment = async (req, res) => {
 // CUSTOM ORDER — PAYSTACK INITIALIZATION
 // ============================================================
 
-
 const initializeCustomOrderPayment = async (req, res) => {
   let payment;
 
@@ -868,8 +1156,7 @@ const applyNewPayment = async ({
         throw getPaymentError("INVALID_PAYMENT_PROVIDER");
       }
 
-      // Idempotency: a repeated webhook or verify call must not add
-      // the same payment to the order again.
+      // Idempotency: prevent duplicate payment application.
       if (payment.status === "successful") {
         result = {
           success: true,
@@ -891,6 +1178,10 @@ const applyNewPayment = async ({
 
       let order;
 
+      // =====================================================
+      // ORDINARY ORDER
+      // =====================================================
+
       if (payment.orderType === "Order") {
         order = await Order.findById(payment.orderId).session(session);
 
@@ -908,7 +1199,6 @@ const applyNewPayment = async ({
 
         const expectedAmountKobo = toKobo(order.total || 0);
 
-        // Normal product orders are full-payment only.
         if (
           expectedAmountKobo <= 0 ||
           toKobo(payment.amount) !== expectedAmountKobo
@@ -925,6 +1215,10 @@ const applyNewPayment = async ({
         }
 
         await order.save({ session });
+
+        // =====================================================
+        // CUSTOM ORDER
+        // =====================================================
       } else if (payment.orderType === "CustomOrder") {
         order = await CustomOrder.findById(payment.orderId).session(session);
 
@@ -960,8 +1254,6 @@ const applyNewPayment = async ({
           throw getPaymentError("INSTALLMENTS_DISABLED");
         }
 
-        // Enforce the maximum installment count when money is actually
-        // applied, not only when checkout is initialized.
         const successfulPayments = await Payment.countDocuments({
           _id: { $ne: payment._id },
           orderType: "CustomOrder",
@@ -971,7 +1263,6 @@ const applyNewPayment = async ({
 
         let completedCount = successfulPayments;
 
-        // Legacy orders may have a paid amount but no payment ledger.
         if (amountPaidKobo > 0 && successfulPayments === 0) {
           completedCount = 1;
         }
@@ -1015,9 +1306,137 @@ const applyNewPayment = async ({
         }
 
         await order.save({ session });
+
+        // =====================================================
+        // PARTY BOOKING
+        // =====================================================
+      } else if (payment.orderType === "PartyBooking") {
+        order = await PartyBooking.findOne({
+          _id: payment.orderId,
+          customer: payment.user,
+        }).session(session);
+
+        if (!order) {
+          throw getPaymentError("PARTY_BOOKING_NOT_FOUND");
+        }
+
+        if (order.status === "cancelled" || order.status === "completed") {
+          throw getPaymentError("PARTY_BOOKING_NOT_PAYABLE");
+        }
+
+        if (!order.quotationAcceptedAt) {
+          throw getPaymentError("PARTY_QUOTATION_NOT_ACCEPTED");
+        }
+
+        if (order.scheduleStatus !== "approved") {
+          throw getPaymentError("PARTY_INSTALLMENT_SCHEDULE_NOT_APPROVED");
+        }
+
+        // Check the overall booking payment deadline.
+        if (
+          order.paymentDeadline &&
+          new Date(order.paymentDeadline).getTime() < Date.now()
+        ) {
+          throw getPaymentError("PARTY_PAYMENT_DEADLINE_PASSED");
+        }
+
+        const quotationKobo = toKobo(order.quotationAmount || 0);
+        const amountPaidKobo = toKobo(order.amountPaid || 0);
+        const paymentAmountKobo = toKobo(payment.amount);
+
+        if (quotationKobo <= 0) {
+          throw getPaymentError("QUOTATION_NOT_READY");
+        }
+
+        const balanceKobo = quotationKobo - amountPaidKobo;
+
+        if (balanceKobo <= 0) {
+          throw getPaymentError("PARTY_BOOKING_ALREADY_PAID");
+        }
+
+        if (
+          !payment.metadata?.installmentId ||
+          !mongoose.Types.ObjectId.isValid(payment.metadata.installmentId)
+        ) {
+          throw getPaymentError("PARTY_INSTALLMENT_NOT_FOUND");
+        }
+
+        const installment = order.installmentSchedule.id(
+          payment.metadata.installmentId,
+        );
+
+        if (!installment) {
+          throw getPaymentError("PARTY_INSTALLMENT_NOT_FOUND");
+        }
+
+        if (installment.status !== "scheduled") {
+          throw getPaymentError("PARTY_INSTALLMENT_ALREADY_PROCESSED");
+        }
+
+        // Recheck the individual installment due date.
+        // The customer can pay throughout the due date.
+        if (installment.dueDate) {
+          const dueDate = new Date(installment.dueDate);
+
+          if (Number.isFinite(dueDate.getTime())) {
+            const dueDateEnd = Date.UTC(
+              dueDate.getUTCFullYear(),
+              dueDate.getUTCMonth(),
+              dueDate.getUTCDate(),
+              23,
+              59,
+              59,
+              999,
+            );
+
+            if (dueDateEnd < Date.now()) {
+              throw getPaymentError("PARTY_PAYMENT_DEADLINE_PASSED");
+            }
+          }
+        }
+
+        const scheduledAmountKobo = toKobo(installment.amount);
+
+        // The approved installment schedule is the source of truth.
+        if (
+          paymentAmountKobo <= 0 ||
+          paymentAmountKobo !== scheduledAmountKobo ||
+          paymentAmountKobo > balanceKobo
+        ) {
+          throw getPaymentError("PAYMENT_AMOUNT_MISMATCH");
+        }
+
+        const newAmountPaidKobo = amountPaidKobo + paymentAmountKobo;
+
+        if (newAmountPaidKobo > quotationKobo) {
+          throw getPaymentError("PAYMENT_EXCEEDS_BALANCE");
+        }
+
+        const now = new Date();
+
+        installment.status = "paid";
+        installment.payment = payment._id;
+        installment.paidAt = now;
+
+        order.amountPaid = fromKobo(newAmountPaidKobo);
+
+        if (newAmountPaidKobo >= quotationKobo) {
+          order.amountPaid = fromKobo(quotationKobo);
+          order.paymentStatus = "paid";
+        } else {
+          order.paymentStatus = "part-paid";
+        }
+
+        // Payment completion does not automatically mark
+        // the booking as ready or completed.
+        await order.save({ session });
       } else {
         throw getPaymentError("INVALID_PAYMENT_PROVIDER");
       }
+
+      // =====================================================
+      // UPDATE PAYMENT LEDGER
+      // =====================================================
 
       payment.status = "successful";
       payment.transactionId = String(transactionId);
@@ -1044,6 +1463,7 @@ const applyNewPayment = async ({
     await session.endSession();
   }
 };
+
 
 const verifyCustomOrderPayment = async (req, res) => {
   try {
@@ -1116,70 +1536,37 @@ const verifyCustomOrderPayment = async (req, res) => {
         throw getPaymentError("PAYMENT_AMOUNT_MISMATCH");
       }
 
-      // // applyNewPayment must apply this ledger entry only once.
-      // const applied = await applyNewPayment({
-      //   paymentId: payment._id,
-      //   provider: "paystack",
-      //   transactionId: transaction.id,
-      // });
-      // if (!applied.alreadyProcessed) {
-      //   await notifyAdminPaymentSafely({
-      //     payment: applied.payment,
-      //     order: updatedCustomOrder,
-      //   });
-      // }
-      // // Reload the order because applyNewPayment may have updated it.
-      // const updatedCustomOrder = await CustomOrder.findOne({
-      //   _id: payment.orderId,
-      //   user: userId,
-      // });
+      const applied = await applyNewPayment({
+        paymentId: payment._id,
+        provider: "paystack",
+        transactionId: transaction.id,
+      });
 
-      // if (!updatedCustomOrder) {
-      //   throw getPaymentError("CUSTOM_ORDER_NOT_FOUND");
-      // }
+      const updatedCustomOrder = await CustomOrder.findOne({
+        _id: payment.orderId,
+        user: userId,
+      });
 
-      // return res.status(200).json({
-      //   success: true,
-      //   alreadyVerified: false,
-      //   message: "Custom order payment verified successfully.",
-      //   payment: applied.payment,
-      //   customOrder: updatedCustomOrder,
-      //   orderType: "CustomOrder",
-      //   orderId: String(updatedCustomOrder._id),
-      // });
-      
-const applied = await applyNewPayment({
-  paymentId: payment._id,
-  provider: "paystack",
-  transactionId: transaction.id,
-});
+      if (!updatedCustomOrder) {
+        throw getPaymentError("CUSTOM_ORDER_NOT_FOUND");
+      }
 
-const updatedCustomOrder = await CustomOrder.findOne({
-  _id: payment.orderId,
-  user: userId,
-});
+      if (!applied.alreadyProcessed) {
+        await notifyAdminPaymentSafely({
+          payment: applied.payment,
+          order: updatedCustomOrder,
+        });
+      }
 
-if (!updatedCustomOrder) {
-  throw getPaymentError("CUSTOM_ORDER_NOT_FOUND");
-}
-
-if (!applied.alreadyProcessed) {
-  await notifyAdminPaymentSafely({
-    payment: applied.payment,
-    order: updatedCustomOrder,
-  });
-}
-
-return res.status(200).json({
-  success: true,
-  alreadyVerified: false,
-  message: "Custom order payment verified successfully.",
-  payment: applied.payment,
-  customOrder: updatedCustomOrder,
-  orderType: "CustomOrder",
-  orderId: String(updatedCustomOrder._id),
-});
-
+      return res.status(200).json({
+        success: true,
+        alreadyVerified: false,
+        message: "Custom order payment verified successfully.",
+        payment: applied.payment,
+        customOrder: updatedCustomOrder,
+        orderType: "CustomOrder",
+        orderId: String(updatedCustomOrder._id),
+      });
     }
 
     /*
@@ -1487,32 +1874,150 @@ const paystackWebhook = async (req, res) => {
 // ============================================================
 
 const initializeFlutterwavePayment = async (req, res) => {
+  let payment = null;
+
   try {
-    const { orderId, customOrderId } = req.body;
+    const { orderId, customOrderId, partyBookingId, installmentId } = req.body;
+
+    const userId = getUserId(req);
     const requestedAmount = getRequestedPaymentAmount(req.body);
 
-    const isCustomOrder = Boolean(customOrderId);
-    const orderType = isCustomOrder ? "CustomOrder" : "Order";
-    const requestedId = isCustomOrder ? customOrderId : orderId;
+    const selectedTypes = [
+      Boolean(orderId),
+      Boolean(customOrderId),
+      Boolean(partyBookingId),
+    ].filter(Boolean).length;
 
-    if (!requestedId) {
+    if (selectedTypes !== 1) {
       return res.status(400).json({
         success: false,
-        message: isCustomOrder
-          ? "Custom order ID is required."
-          : "Order ID is required.",
+        message:
+          "Provide exactly one of orderId, customOrderId, or partyBookingId.",
       });
     }
 
-    const result = await getNewPaymentOrder(
-      req,
-      orderType,
-      requestedId,
-      isCustomOrder ? requestedAmount : undefined,
-    );
+    let orderType;
+    let order;
+    let amount;
+    let email;
+    let customerName;
+    let metadata;
+    let description;
+    let isCustomOrder = false;
+    let isPartyBooking = false;
 
-    const { order, amount } = result;
-    const email = getCustomerEmail(order);
+    // -------------------------------------------------------
+    // PARTY BOOKING INSTALLMENT
+    // -------------------------------------------------------
+
+    if (partyBookingId) {
+      isPartyBooking = true;
+
+      if (!installmentId) {
+        return res.status(400).json({
+          success: false,
+          message: "An installment ID is required for Party Booking payments.",
+        });
+      }
+
+      const result = await getPartyBookingPaymentDetails({
+        bookingId: partyBookingId,
+        installmentId,
+        userId,
+        provider: "flutterwave",
+      });
+
+      const {
+        booking,
+        installment,
+        amount: installmentAmount,
+        customerEmail,
+      } = result;
+
+      // Prevent multiple active attempts for this installment,
+      // including attempts made through another payment provider.
+      const existingPayment = await Payment.findOne({
+        orderType: "PartyBooking",
+        orderId: booking._id,
+        user: userId,
+        "metadata.installmentId": String(installment._id),
+        status: {
+          $in: ["pending", "processing", "awaiting_confirmation"],
+        },
+      });
+
+      if (existingPayment) {
+        throw getPaymentError("PARTY_INSTALLMENT_PAYMENT_IN_PROGRESS");
+      }
+
+      orderType = "PartyBooking";
+      order = booking;
+      amount = installmentAmount;
+      email = customerEmail;
+      customerName = booking.contactName || "ABS CUT Customer";
+
+      metadata = {
+        purpose: "party_booking_installment",
+        partyBookingId: String(booking._id),
+        installmentId: String(installment._id),
+        installmentAmount: amount,
+        installmentDueDate: installment.dueDate,
+      };
+
+      description = "Party booking installment payment";
+    }
+
+    // -------------------------------------------------------
+    // CUSTOM ORDER
+    // -------------------------------------------------------
+    else if (customOrderId) {
+      isCustomOrder = true;
+      orderType = "CustomOrder";
+
+      const result = await getNewPaymentOrder(
+        req,
+        orderType,
+        customOrderId,
+        requestedAmount,
+      );
+
+      order = result.order;
+      amount = result.amount;
+      email = getCustomerEmail(order);
+
+      customerName =
+        `${order.user?.firstName || ""} ${order.user?.lastName || ""}`.trim() ||
+        "ABS CUT Customer";
+
+      metadata = {
+        purpose: "custom_order_installment",
+      };
+
+      description = "Custom order payment";
+    }
+
+    // -------------------------------------------------------
+    // NORMAL PRODUCT ORDER
+    // -------------------------------------------------------
+    else {
+      orderType = "Order";
+
+      const result = await getNewPaymentOrder(req, orderType, orderId);
+
+      order = result.order;
+      amount = result.amount;
+      email = getCustomerEmail(order);
+
+      customerName =
+        `${order.user?.firstName || ""} ${order.user?.lastName || ""}`.trim() ||
+        "ABS CUT Customer";
+
+      metadata = {
+        purpose: "product_order_full_payment",
+      };
+
+      description = "Product order payment";
+    }
 
     if (!email) {
       return res.status(400).json({
@@ -1521,61 +2026,66 @@ const initializeFlutterwavePayment = async (req, res) => {
       });
     }
 
+    // -------------------------------------------------------
+    // CREATE PAYMENT LEDGER RECORD
+    // -------------------------------------------------------
+
     const reference = makeReference(
-      isCustomOrder ? "ABS-CUT-FLW-CUSTOM" : "ABS-CUT-FLW",
+      isPartyBooking
+        ? "ABS-CUT-FLW-PARTY"
+        : isCustomOrder
+          ? "ABS-CUT-FLW-CUSTOM"
+          : "ABS-CUT-FLW",
     );
 
-    const payment = await createPaymentRecord({
-      userId: getUserId(req),
+    payment = await createPaymentRecord({
+      userId,
       orderType,
       orderId: order._id,
       provider: "flutterwave",
       amount,
       reference,
-      metadata: {
-        purpose: isCustomOrder
-          ? "custom_order_installment"
-          : "product_order_full_payment",
-      },
+      metadata,
     });
+
+    // -------------------------------------------------------
+    // INITIALIZE FLUTTERWAVE CHECKOUT
+    // -------------------------------------------------------
 
     const response = await flutterwave.post("/payments", {
       tx_ref: reference,
       amount,
       currency: CURRENCY,
       redirect_url: getFrontendCallbackUrl(),
+
       customer: {
         email,
-        name:
-          `${order.user?.firstName || ""} ${
-            order.user?.lastName || ""
-          }`.trim() || "ABS CUT Customer",
+        name: customerName,
       },
+
       meta: {
         paymentId: String(payment._id),
         orderId: String(order._id),
         orderType,
-        userId: String(getUserId(req)),
+        userId: String(userId),
+        ...metadata,
       },
+
       customizations: {
         title: "ABS CUT",
-        description: isCustomOrder
-          ? "Custom order payment"
-          : "Product order payment",
+        description,
       },
     });
 
     const data = response?.data?.data;
 
     if (!data?.link) {
-      // Keep the ledger record pending if the provider response is
-      // ambiguous; a later webhook/verification may still resolve it.
-      return res.status(502).json({
-        success: false,
-        message: "Flutterwave did not return a checkout link.",
-        reference,
-      });
+      throw getPaymentError("FLUTTERWAVE_CHECKOUT_URL_MISSING");
     }
+
+    // -------------------------------------------------------
+    // PRESERVE CUSTOM ORDER BEHAVIOUR
+    // -------------------------------------------------------
 
     if (isCustomOrder) {
       order.paymentReference = reference;
@@ -1588,25 +2098,70 @@ const initializeFlutterwavePayment = async (req, res) => {
       }
 
       await order.save();
-    } else {
+    }
+
+    // -------------------------------------------------------
+    // PRESERVE NORMAL ORDER BEHAVIOUR
+    // -------------------------------------------------------
+
+    if (!isPartyBooking && !isCustomOrder) {
       order.paymentReference = reference;
       await order.save();
     }
 
+    // -------------------------------------------------------
+    // SUCCESS RESPONSE
+    // -------------------------------------------------------
+
     return res.status(200).json({
       success: true,
-      message: "Flutterwave payment initialized successfully.",
+      message: isPartyBooking
+        ? "Party booking installment payment initialized successfully."
+        : "Flutterwave payment initialized successfully.",
+
       authorizationUrl: data.link,
       link: data.link,
       reference,
       amount,
       currency: CURRENCY,
       paymentId: payment._id,
+      orderType,
+      orderId: String(order._id),
+      installmentId: isPartyBooking ? String(installmentId) : undefined,
     });
   } catch (error) {
+    // -------------------------------------------------------
+    // CLEAN UP FAILED CHECKOUT ATTEMPTS
+    // -------------------------------------------------------
+
+    // Only change this payment if it is still pending.
+    // This prevents a stale document from overwriting a payment
+    // that may already have been processed elsewhere.
+    if (payment?._id) {
+      try {
+        await Payment.updateOne(
+          {
+            _id: payment._id,
+            status: "pending",
+          },
+          {
+            $set: {
+              status: "failed",
+            },
+          },
+        );
+      } catch (cleanupError) {
+        console.error(
+          "Could not update failed Flutterwave payment:",
+          cleanupError.message,
+        );
+      }
+    }
+
     return sendError(res, error, "Initialize Flutterwave payment error:");
   }
 };
+
 
 // ============================================================
 // FLUTTERWAVE — VERIFY TRANSACTION
@@ -1624,7 +2179,6 @@ const verifyFlutterwavePayment = async (req, res) => {
       reference || tx_ref || req.params.reference || "",
     ).trim();
 
-    // Flutterwave transaction IDs commonly arrive as numeric strings.
     if (
       !suppliedTransactionId ||
       !/^\d+$/.test(suppliedTransactionId) ||
@@ -1653,13 +2207,24 @@ const verifyFlutterwavePayment = async (req, res) => {
       throw getPaymentError("PAYMENT_NOT_FOUND");
     }
 
-    /*
-     * Load the associated order.
-     */
     let order = null;
     let customOrder = null;
+    let booking = null;
 
-    if (payment.orderType === "CustomOrder") {
+    // -------------------------------------------------------
+    // LOAD THE ASSOCIATED RECORD
+    // -------------------------------------------------------
+
+    if (payment.orderType === "PartyBooking") {
+      booking = await PartyBooking.findOne({
+        _id: payment.orderId,
+        customer: userId,
+      }).populate("customer", "email firstName lastName");
+
+      if (!booking) {
+        throw getPaymentError("PARTY_BOOKING_NOT_FOUND");
+      }
+    } else if (payment.orderType === "CustomOrder") {
       customOrder = await CustomOrder.findOne({
         _id: payment.orderId,
         user: userId,
@@ -1681,10 +2246,10 @@ const verifyFlutterwavePayment = async (req, res) => {
       throw getPaymentError("PAYMENT_NOT_FOUND");
     }
 
-    /*
-     * Idempotent response for an already-successful payment.
-     * Do not apply the same installment twice.
-     */
+    // -------------------------------------------------------
+    // IDEMPOTENCY
+    // -------------------------------------------------------
+
     if (payment.status === "successful") {
       return res.status(200).json({
         success: true,
@@ -1693,14 +2258,20 @@ const verifyFlutterwavePayment = async (req, res) => {
         payment,
         order,
         customOrder,
+        booking,
         orderId: String(payment.orderId),
         orderType: payment.orderType,
       });
     }
 
-    /*
-     * Verify the transaction directly with Flutterwave.
-     */
+    if (!["pending", "processing"].includes(payment.status)) {
+      throw getPaymentError("PAYMENT_ALREADY_PROCESSED");
+    }
+
+    // -------------------------------------------------------
+    // VERIFY DIRECTLY WITH FLUTTERWAVE
+    // -------------------------------------------------------
+
     const response = await flutterwave.get(
       `/transactions/${encodeURIComponent(suppliedTransactionId)}/verify`,
     );
@@ -1723,13 +2294,7 @@ const verifyFlutterwavePayment = async (req, res) => {
       throw getPaymentError("PAYMENT_CURRENCY_MISMATCH");
     }
 
-    /*
-     * Validate the actual amount received.
-     *
-     * Flutterwave's transaction amount is expressed in the
-     * major currency unit, for example NGN 5000.00.
-     * Compare it with the ledger amount, not the full quotation.
-     */
+    // Verify the exact amount recorded in the payment ledger.
     if (
       !Number.isFinite(Number(transaction.amount)) ||
       toKobo(transaction.amount) !== toKobo(payment.amount)
@@ -1737,18 +2302,30 @@ const verifyFlutterwavePayment = async (req, res) => {
       throw getPaymentError("PAYMENT_AMOUNT_MISMATCH");
     }
 
-    // Record the verified transaction and apply this payment once.
+    // -------------------------------------------------------
+    // APPLY THE VERIFIED PAYMENT
+    // -------------------------------------------------------
+
     const applied = await applyNewPayment({
       paymentId: payment._id,
       provider: "flutterwave",
       transactionId: String(transaction.id),
     });
 
-    /*
-     * Reload the order after payment application so the frontend
-     * receives the latest balance and payment status.
-     */
-    if (payment.orderType === "CustomOrder") {
+    // -------------------------------------------------------
+    // RELOAD THE UPDATED RECORD
+    // -------------------------------------------------------
+
+    if (payment.orderType === "PartyBooking") {
+      booking = await PartyBooking.findOne({
+        _id: payment.orderId,
+        customer: userId,
+      }).populate("customer", "email firstName lastName");
+
+      if (!booking) {
+        throw getPaymentError("PARTY_BOOKING_NOT_FOUND");
+      }
+    } else if (payment.orderType === "CustomOrder") {
       customOrder = await CustomOrder.findOne({
         _id: payment.orderId,
         user: userId,
@@ -1768,13 +2345,33 @@ const verifyFlutterwavePayment = async (req, res) => {
       }
     }
 
+    // -------------------------------------------------------
+    // NOTIFY ADMIN FOR ALL PAYMENT TYPES
+    // -------------------------------------------------------
+
+    if (!applied.alreadyProcessed) {
+      await notifyAdminPaymentSafely({
+        payment: applied.payment,
+        order: booking || customOrder || order,
+      });
+    }
+
+    // -------------------------------------------------------
+    // RESPONSE
+    // -------------------------------------------------------
+
     return res.status(200).json({
       success: true,
-      alreadyVerified: false,
-      message: "Flutterwave payment verified successfully.",
+      alreadyVerified: Boolean(applied.alreadyProcessed),
+      message:
+        payment.orderType === "PartyBooking"
+          ? "Party booking installment payment verified successfully."
+          : "Flutterwave payment verified successfully.",
+
       payment: applied.payment,
       order,
       customOrder,
+      booking,
       orderId: String(payment.orderId),
       orderType: payment.orderType,
     });
@@ -1782,6 +2379,7 @@ const verifyFlutterwavePayment = async (req, res) => {
     return sendError(res, error, "Verify Flutterwave payment error:");
   }
 };
+
 
 // ============================================================
 // FLUTTERWAVE WEBHOOK
@@ -1856,23 +2454,18 @@ const flutterwaveWebhook = async (req, res) => {
       return res.status(400).send("Payment details do not match.");
     }
 
-   
-    
-const applied = await applyNewPayment({
-  paymentId: payment._id,
-  provider: "flutterwave",
-  transactionId: transaction.id || transactionId,
-});
+    const applied = await applyNewPayment({
+      paymentId: payment._id,
+      provider: "flutterwave",
+      transactionId: transaction.id || transactionId,
+    });
+    if (!applied.alreadyProcessed) {
+      await notifyAdminPaymentSafely({
+        payment: applied.payment,
+      });
+    }
 
-if (!applied.alreadyProcessed) {
-  await notifyAdminPaymentSafely({
-    payment: applied.payment,
-    order: applied.order,
-  });
-}
-
-return res.status(200).send("Payment processed.");
-
+    return res.status(200).send("Payment processed.");
   } catch (error) {
     console.error(
       "Flutterwave webhook error:",
@@ -1886,34 +2479,47 @@ return res.status(200).send("Payment processed.");
 // ============================================================
 // BANK TRANSFER — INITIALIZE
 // ============================================================
-
 const initializeBankTransfer = async (req, res) => {
   try {
-    const { orderId, customOrderId } = req.body;
+    const { orderId, customOrderId, partyBookingId, installmentId } = req.body;
+
+    const userId = getUserId(req);
     const requestedAmount = getRequestedPaymentAmount(req.body);
 
-    const isCustomOrder = Boolean(customOrderId);
-    const orderType = isCustomOrder ? "CustomOrder" : "Order";
-    const requestedId = isCustomOrder ? customOrderId : orderId;
+    // Exactly one payment target must be supplied.
+    const targets = [
+      Boolean(orderId),
+      Boolean(customOrderId),
+      Boolean(partyBookingId),
+    ];
 
-    if (!requestedId) {
+    if (targets.filter(Boolean).length !== 1) {
       return res.status(400).json({
         success: false,
-        message: isCustomOrder
-          ? "Custom order ID is required."
-          : "Order ID is required.",
+        message:
+          "Provide exactly one order, custom order, or party booking ID.",
       });
     }
 
-    const result = await getNewPaymentOrder(
-      req,
-      orderType,
-      requestedId,
-      isCustomOrder ? requestedAmount : undefined,
-    );
+    const isPartyBooking = Boolean(partyBookingId);
+    const isCustomOrder = Boolean(customOrderId);
 
-    const { order, amount, balance } = result;
+    const orderType = isPartyBooking
+      ? "PartyBooking"
+      : isCustomOrder
+        ? "CustomOrder"
+        : "Order";
 
+    const requestedId = partyBookingId || customOrderId || orderId;
+
+    if (isPartyBooking && !installmentId) {
+      return res.status(400).json({
+        success: false,
+        message: "Party booking installment ID is required.",
+      });
+    }
+
+    // Read configured bank details.
     const bankName = (
       process.env.BANK_TRANSFER_BANK_NAME ||
       process.env.BANK_NAME ||
@@ -1936,60 +2542,519 @@ const initializeBankTransfer = async (req, res) => {
       throw getPaymentError("BANK_TRANSFER_DETAILS_MISSING");
     }
 
-    const reference = makeReference("ABS-CUT-BANK");
+    let order = null;
+    let amount = 0;
+    let balance = 0;
+    let payment = null;
+    let partyInstallment = null;
 
-    const payment = await createPaymentRecord({
-      userId: getUserId(req),
-      orderType,
-      orderId: order._id,
-      provider: "bank_transfer",
-      amount,
-      reference,
-      metadata: {
-        purpose: isCustomOrder
-          ? "custom_order_installment"
-          : "product_order_full_payment",
-        requestedAmount: amount,
-        balanceBeforePayment: balance,
-      },
-    });
+    // =====================================================
+    // PARTY BOOKING
+    // =====================================================
 
-    return res.status(201).json({
+    if (isPartyBooking) {
+      const result = await getPartyBookingPaymentDetails({
+        bookingId: partyBookingId,
+        installmentId,
+        userId,
+        provider: "bank_transfer",
+      });
+
+      const {
+        booking,
+        installment,
+        amount: installmentAmount,
+        balance: outstandingBalance,
+      } = result;
+
+      order = booking;
+      partyInstallment = installment;
+      amount = installmentAmount;
+      balance = outstandingBalance;
+
+      // Reuse an existing active attempt for this installment.
+      payment = await Payment.findOne({
+        user: userId,
+        orderType: "PartyBooking",
+        orderId: booking._id,
+        provider: "bank_transfer",
+        "metadata.installmentId": String(installment._id),
+        status: {
+          $in: ["pending", "awaiting_confirmation"],
+        },
+      }).sort({ createdAt: -1 });
+
+      if (!payment) {
+        payment = await createPaymentRecord({
+          userId,
+          orderType: "PartyBooking",
+          orderId: booking._id,
+          provider: "bank_transfer",
+          amount,
+          reference: makeReference("ABS-CUT-PARTY-BANK"),
+          metadata: {
+            purpose: "party_booking_installment",
+            partyBookingId: String(booking._id),
+            installmentId: String(installment._id),
+            installmentAmount: amount,
+            balanceBeforePayment: balance,
+            dueDate: installment.dueDate,
+          },
+        });
+      }
+    }
+
+    // =====================================================
+    // ORDINARY ORDER / CUSTOM ORDER
+    // =====================================================
+    else {
+      const reusablePayments = await Payment.find({
+        user: userId,
+        provider: "bank_transfer",
+        orderType,
+        orderId: requestedId,
+        status: {
+          $in: ["pending", "awaiting_confirmation"],
+        },
+      }).sort({ createdAt: -1 });
+
+      if (reusablePayments.length > 0) {
+        const Model = isCustomOrder ? CustomOrder : Order;
+
+        order = await Model.findOne({
+          _id: requestedId,
+          user: userId,
+        });
+
+        if (!order) {
+          throw getPaymentError(
+            isCustomOrder ? "CUSTOM_ORDER_NOT_FOUND" : "ORDER_NOT_FOUND",
+          );
+        }
+
+        if (
+          (isCustomOrder &&
+            String(order.status || "").toLowerCase() === "cancelled") ||
+          (!isCustomOrder && order.orderStatus === "cancelled")
+        ) {
+          throw getPaymentError("ORDER_CANCELLED");
+        }
+
+        if (isCustomOrder) {
+          const quotationKobo = toKobo(order.quotation || 0);
+          const paidKobo = toKobo(order.amountPaid || 0);
+          const balanceKobo = quotationKobo - paidKobo;
+
+          if (quotationKobo <= 0) {
+            throw getPaymentError("QUOTATION_NOT_READY");
+          }
+
+          if (balanceKobo <= 0) {
+            throw getPaymentError("CUSTOM_ORDER_ALREADY_PAID");
+          }
+
+          balance = fromKobo(balanceKobo);
+        } else {
+          if (order.paymentStatus === "paid") {
+            throw getPaymentError("ORDER_ALREADY_PAID");
+          }
+
+          balance = Number(order.total || 0);
+        }
+
+        const requestedAmountNumber =
+          requestedAmount === undefined ||
+          requestedAmount === null ||
+          requestedAmount === ""
+            ? null
+            : Number(requestedAmount);
+
+        payment =
+          reusablePayments.find((candidate) => {
+            const candidateKobo = toKobo(candidate.amount);
+
+            if (candidateKobo <= 0 || candidateKobo > toKobo(balance)) {
+              return false;
+            }
+
+            if (!isCustomOrder && candidateKobo !== toKobo(balance)) {
+              return false;
+            }
+
+            if (
+              isCustomOrder &&
+              requestedAmountNumber !== null &&
+              candidateKobo !== toKobo(requestedAmountNumber)
+            ) {
+              return false;
+            }
+
+            return true;
+          }) || null;
+
+        if (payment) {
+          amount = Number(payment.amount);
+        }
+      }
+
+      if (!payment) {
+        const result = await getNewPaymentOrder(
+          req,
+          orderType,
+          requestedId,
+          isCustomOrder ? requestedAmount : undefined,
+        );
+
+        order = result.order;
+        amount = result.amount;
+        balance = result.balance;
+
+        payment = await createPaymentRecord({
+          userId,
+          orderType,
+          orderId: order._id,
+          provider: "bank_transfer",
+          amount,
+          reference: makeReference("ABS-CUT-BANK"),
+          metadata: {
+            purpose: isCustomOrder
+              ? "custom_order_installment"
+              : "product_order_full_payment",
+            requestedAmount: amount,
+            balanceBeforePayment: balance,
+          },
+        });
+      }
+    }
+
+    // =====================================================
+    // RESPONSE
+    // =====================================================
+
+    return res.status(200).json({
       success: true,
-      message: "Bank transfer instructions created.",
+      message:
+        payment.status === "awaiting_confirmation"
+          ? "Your submitted transfer is awaiting confirmation."
+          : "Bank transfer instructions are ready.",
+
       paymentId: payment._id,
       reference: payment.reference,
       amount: payment.amount,
       balance,
       currency: CURRENCY,
+
       payment: {
         _id: payment._id,
         id: payment._id,
         reference: payment.reference,
         amount: payment.amount,
         status: payment.status,
+        transferSenderName: payment.transferSenderName || "",
+        transferAmount: payment.transferAmount ?? null,
+        transferDate: payment.transferDate || null,
+        transferTransactionId: payment.transferTransactionId || "",
+        receiptUrl: payment.receiptUrl || "",
+        evidenceSubmittedAt: payment.evidenceSubmittedAt || null,
       },
+
       bankDetails: {
         bankName,
         accountName,
         accountHolder: accountName,
         accountNumber,
       },
+
+      partyBooking: isPartyBooking
+        ? {
+            _id: order._id,
+            quotationAmount: order.quotationAmount,
+            amountPaid: order.amountPaid,
+            paymentStatus: order.paymentStatus,
+            installment: {
+              _id: partyInstallment._id,
+              amount: partyInstallment.amount,
+              dueDate: partyInstallment.dueDate,
+              status: partyInstallment.status,
+            },
+          }
+        : undefined,
+
       instructions:
-        "Transfer the exact amount using the payment reference, then submit your transfer details for admin confirmation.",
+        "Transfer the exact amount shown. After completing the transfer, submit your sender details and receipt for ABS CUT admin verification.",
     });
   } catch (error) {
     return sendError(res, error, "Initialize bank transfer error:");
   }
 };
 
+const initializePartyBookingPayment = async (req, res) => {
+  let payment;
+
+  try {
+    const { partyBookingId, installmentId } = req.body;
+
+    if (!partyBookingId || !installmentId) {
+      return res.status(400).json({
+        success: false,
+        message: "Party booking ID and installment ID are required.",
+      });
+    }
+
+    const userId = getUserId(req);
+
+    // Validate booking, installment, customer email and settings.
+    const result = await getPartyBookingPaymentDetails({
+      bookingId: partyBookingId,
+      installmentId,
+      userId,
+      provider: "paystack",
+    });
+
+    const { booking, installment, amount, customerEmail } = result;
+
+    // Prevent multiple active payment attempts for the same
+    // installment across Paystack, Flutterwave and bank transfer.
+    const existingPayment = await Payment.findOne({
+      orderType: "PartyBooking",
+      orderId: booking._id,
+      user: userId,
+      "metadata.installmentId": String(installment._id),
+      status: {
+        $in: ["pending", "processing", "awaiting_confirmation"],
+      },
+    });
+
+    if (existingPayment) {
+      throw getPaymentError("PARTY_INSTALLMENT_PAYMENT_IN_PROGRESS");
+    }
+
+    const reference = makeReference("ABS-CUT-PARTY");
+
+    // Create the payment ledger record first.
+    payment = await createPaymentRecord({
+      userId,
+      orderType: "PartyBooking",
+      orderId: booking._id,
+      provider: "paystack",
+      amount,
+      reference,
+      metadata: {
+        purpose: "party_booking_installment",
+        installmentId: String(installment._id),
+        partyBookingId: String(booking._id),
+        installmentAmount: amount,
+      },
+    });
+
+    // Initialize Paystack checkout.
+    const response = await paystack.post("/transaction/initialize", {
+      email: customerEmail,
+      amount: toKobo(amount),
+      currency: CURRENCY,
+      reference,
+      callback_url: getFrontendCallbackUrl(),
+      metadata: {
+        paymentId: String(payment._id),
+        partyBookingId: String(booking._id),
+        installmentId: String(installment._id),
+        userId: String(userId),
+        orderType: "PartyBooking",
+        purpose: "party_booking_installment",
+      },
+    });
+
+    const data = response?.data?.data;
+
+    if (!data?.authorization_url || !data?.reference) {
+      payment.status = "failed";
+      await payment.save();
+
+      throw getPaymentError("PAYSTACK_CHECKOUT_URL_MISSING");
+    }
+
+    // Save the actual reference returned by Paystack.
+    payment.reference = data.reference;
+    await payment.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Party booking payment initialized successfully.",
+      authorizationUrl: data.authorization_url,
+      accessCode: data.access_code,
+      reference: data.reference,
+      amount,
+      currency: CURRENCY,
+      paymentId: payment._id,
+      payment: {
+        _id: payment._id,
+        reference: data.reference,
+        amount,
+        status: payment.status,
+      },
+      booking: {
+        _id: booking._id,
+        quotationAmount: booking.quotationAmount,
+        amountPaid: booking.amountPaid,
+        paymentStatus: booking.paymentStatus,
+      },
+      installment: {
+        _id: installment._id,
+        amount: installment.amount,
+        dueDate: installment.dueDate,
+        status: installment.status,
+      },
+    });
+  } catch (error) {
+    // If checkout initialization fails, do not leave a pending
+    // ledger record that permanently blocks another attempt.
+    if (payment && payment.status === "pending") {
+      try {
+        payment.status = "failed";
+        await payment.save();
+      } catch (saveError) {
+        console.error(
+          "Could not update failed party payment:",
+          saveError.message,
+        );
+      }
+    }
+
+    return sendError(
+      res,
+      error,
+      "Initialize party booking Paystack payment error:",
+    );
+  }
+};
+
 // ============================================================
-// BANK TRANSFER — CUSTOMER SUBMITS TRANSFER DETAILS
+// PARTY BOOKING — PAYSTACK VERIFICATION
 // ============================================================
+
+const verifyPartyBookingPayment = async (req, res) => {
+  try {
+    const { reference } = req.params;
+    const userId = getUserId(req);
+
+    if (!reference) {
+      return res.status(400).json({
+        success: false,
+        message: "Payment reference is required.",
+      });
+    }
+
+    // Find the customer's Paystack ledger payment.
+    const payment = await findPaymentByReference(reference, "paystack", userId);
+
+    if (!payment || payment.orderType !== "PartyBooking") {
+      throw getPaymentError("PARTY_BOOKING_NOT_FOUND");
+    }
+
+    // Confirm that this booking belongs to the logged-in customer.
+    const booking = await PartyBooking.findOne({
+      _id: payment.orderId,
+      customer: userId,
+    }).populate("customer", "email firstName lastName");
+
+    if (!booking) {
+      throw getPaymentError("PARTY_BOOKING_NOT_FOUND");
+    }
+
+    // Return an idempotent success for an already-verified payment.
+    if (payment.status === "successful") {
+      return res.status(200).json({
+        success: true,
+        alreadyVerified: true,
+        message: "This party booking payment has already been verified.",
+        payment,
+        booking,
+        orderType: "PartyBooking",
+        orderId: String(booking._id),
+      });
+    }
+
+    if (!["pending", "processing"].includes(payment.status)) {
+      throw getPaymentError("PAYMENT_ALREADY_PROCESSED");
+    }
+
+    // Verify directly with Paystack.
+    const transaction = await verifyPaystackTransaction(reference);
+
+    if (
+      transaction?.status !== "success" ||
+      transaction?.reference !== reference
+    ) {
+      throw getPaymentError("PAYMENT_NOT_CONFIRMED");
+    }
+
+    if (String(transaction.currency || "").toUpperCase() !== CURRENCY) {
+      throw getPaymentError("PAYMENT_CURRENCY_MISMATCH");
+    }
+
+    // Verify the exact amount recorded in our payment ledger.
+    if (
+      !Number.isFinite(Number(transaction.amount)) ||
+      Number(transaction.amount) !== toKobo(payment.amount)
+    ) {
+      throw getPaymentError("PAYMENT_AMOUNT_MISMATCH");
+    }
+
+    if (!transaction.id) {
+      throw getPaymentError("INVALID_TRANSACTION_ID");
+    }
+
+    // Apply the verified payment to the correct installment.
+    const applied = await applyNewPayment({
+      paymentId: payment._id,
+      provider: "paystack",
+      transactionId: transaction.id,
+    });
+
+    // Retrieve the updated booking.
+    const updatedBooking = await PartyBooking.findOne({
+      _id: payment.orderId,
+      customer: userId,
+    }).populate("customer", "email firstName lastName");
+
+    if (!updatedBooking) {
+      throw getPaymentError("PARTY_BOOKING_NOT_FOUND");
+    }
+
+    if (!applied.alreadyProcessed) {
+      await notifyAdminPaymentSafely({
+        payment: applied.payment,
+        order: updatedBooking,
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      alreadyVerified: false,
+      message: "Party booking payment verified successfully.",
+      payment: applied.payment,
+      booking: updatedBooking,
+      orderType: "PartyBooking",
+      orderId: String(updatedBooking._id),
+    });
+  } catch (error) {
+    return sendError(
+      res,
+      error,
+      "Verify party booking Paystack payment error:",
+    );
+  }
+};
 
 const submitBankTransfer = async (req, res) => {
   try {
-    const { paymentId, reference, transferSenderName, receiptUrl } = req.body;
+    const {
+      paymentId,
+      reference,
+      transferSenderName,
+      transferAmount,
+      receiptUrl,
+    } = req.body;
 
     if (!paymentId && !reference) {
       return res.status(400).json({
@@ -1998,22 +3063,48 @@ const submitBankTransfer = async (req, res) => {
       });
     }
 
-    if (!String(transferSenderName || "").trim()) {
+    const senderName = String(transferSenderName || "").trim();
+
+    const receipt = String(receiptUrl || "").trim();
+
+    const amount = Number(transferAmount);
+
+    if (!senderName) {
       throw getPaymentError("BANK_TRANSFER_SENDER_REQUIRED");
     }
 
+    if (
+      transferAmount === undefined ||
+      transferAmount === null ||
+      String(transferAmount).trim() === "" ||
+      !Number.isFinite(amount) ||
+      amount <= 0
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Enter a valid transfer amount.",
+      });
+    }
+
+    // Receipt is required by the current payment policy.
+    if (!receipt || !/^https?:\/\//i.test(receipt)) {
+      throw getPaymentError("BANK_TRANSFER_RECEIPT_REQUIRED");
+    }
+
+    // Find the payment belonging to the logged-in customer.
     const filter = {
       user: getUserId(req),
       provider: "bank_transfer",
-      status: { $in: ["pending", "awaiting_confirmation"] },
     };
 
-    if (paymentId && isValidObjectId(paymentId)) {
+    if (paymentId) {
+      if (!isValidObjectId(paymentId)) {
+        throw getPaymentError("PAYMENT_NOT_FOUND");
+      }
+
       filter._id = paymentId;
-    } else if (reference) {
-      filter.reference = reference;
     } else {
-      throw getPaymentError("PAYMENT_NOT_FOUND");
+      filter.reference = String(reference).trim();
     }
 
     const payment = await Payment.findOne(filter);
@@ -2022,115 +3113,352 @@ const submitBankTransfer = async (req, res) => {
       throw getPaymentError("PAYMENT_NOT_FOUND");
     }
 
-    payment.status = "awaiting_confirmation";
-    payment.transferSenderName = String(transferSenderName).trim();
+    // Prevent duplicate submission.
+    if (payment.status === "awaiting_confirmation") {
+      const sameSubmission =
+        payment.transferSenderName === senderName &&
+        toKobo(payment.transferAmount) === toKobo(amount) &&
+        payment.receiptUrl === receipt;
 
-    if (receiptUrl) {
-      payment.receiptUrl = String(receiptUrl).trim();
+      if (sameSubmission) {
+        return res.status(200).json({
+          success: true,
+          message: "Your transfer is already awaiting admin confirmation.",
+          payment,
+        });
+      }
+
+      return res.status(409).json({
+        success: false,
+        message:
+          "Transfer evidence has already been submitted. Contact ABS CUT if you need to correct it.",
+      });
     }
+
+    if (payment.status !== "pending") {
+      throw getPaymentError("PAYMENT_NOT_AWAITING_CONFIRMATION");
+    }
+
+    // Verify the submitted amount.
+    if (toKobo(amount) !== toKobo(payment.amount)) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "The transfer amount does not match the amount requested for this payment. Please contact ABS CUT if you made a different payment.",
+        expectedAmount: payment.amount,
+        submittedAmount: amount,
+      });
+    }
+
+    // PARTY BOOKING VALIDATION
+    if (payment.orderType === "PartyBooking") {
+      const booking = await PartyBooking.findOne({
+        _id: payment.orderId,
+        customer: getUserId(req),
+      });
+
+      if (!booking) {
+        throw getPaymentError("PARTY_BOOKING_NOT_FOUND");
+      }
+
+      if (["cancelled", "completed"].includes(booking.status)) {
+        throw getPaymentError("PARTY_BOOKING_NOT_PAYABLE");
+      }
+
+      if (
+        !booking.quotationAcceptedAt ||
+        booking.scheduleStatus !== "approved"
+      ) {
+        throw getPaymentError("PARTY_INSTALLMENT_SCHEDULE_NOT_APPROVED");
+      }
+
+      const installmentId = payment.metadata?.installmentId;
+
+      const installment = booking.installmentSchedule.id(installmentId);
+
+      if (!installment || installment.status !== "scheduled") {
+        throw getPaymentError("PARTY_INSTALLMENT_ALREADY_PROCESSED");
+      }
+    }
+
+    payment.transferSenderName = senderName;
+    payment.transferAmount = amount;
+    payment.receiptUrl = receipt;
+    payment.evidenceSubmittedAt = new Date();
+
+    // Do not assign transferDate here.
+    // Do not assign transferTransactionId here.
+
+    payment.status = "awaiting_confirmation";
 
     await payment.save();
 
     return res.status(200).json({
       success: true,
       message:
-        "Transfer details submitted. Your payment is awaiting admin confirmation.",
-      payment,
+        "Transfer evidence submitted successfully. Your payment is awaiting ABS CUT admin verification.",
+
+      payment: {
+        _id: payment._id,
+        reference: payment.reference,
+        orderType: payment.orderType,
+        orderId: payment.orderId,
+        amount: payment.amount,
+        transferSenderName: payment.transferSenderName,
+        transferAmount: payment.transferAmount,
+        receiptUrl: payment.receiptUrl,
+        evidenceSubmittedAt: payment.evidenceSubmittedAt,
+        status: payment.status,
+      },
     });
   } catch (error) {
     return sendError(res, error, "Submit bank transfer error:");
   }
 };
 
-// ============================================================
-// BANK TRANSFER — ADMIN CONFIRMS PAYMENT
-// ============================================================
 const confirmBankTransfer = async (req, res) => {
   try {
-    const { paymentId, bankTransactionId } = req.body;
+    const { paymentId, bankTransactionId, verifiedAmount } = req.body;
 
-    if (!paymentId || !isValidObjectId(paymentId)) {
-      throw getPaymentError("PAYMENT_NOT_FOUND");
-    }
-
-    const transactionNumber = String(bankTransactionId || "").trim();
-
-    if (!transactionNumber) {
+    if (
+      !paymentId ||
+      !bankTransactionId ||
+      verifiedAmount === undefined ||
+      verifiedAmount === null ||
+      String(verifiedAmount).trim() === ""
+    ) {
       return res.status(400).json({
         success: false,
-        message: "The bank transaction number is required.",
+        message:
+          "Payment ID, verified bank transaction ID and verified amount are required.",
+      });
+    }
+
+    if (!isValidObjectId(paymentId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid payment ID.",
+      });
+    }
+
+    const transactionId = String(bankTransactionId).trim();
+    const amount = Number(verifiedAmount);
+
+    if (!transactionId) {
+      return res.status(400).json({
+        success: false,
+        message: "Enter the verified bank transaction ID.",
+      });
+    }
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Enter a valid verified transfer amount.",
       });
     }
 
     const payment = await Payment.findOne({
       _id: paymentId,
       provider: "bank_transfer",
-      status: "awaiting_confirmation",
     });
 
     if (!payment) {
-      throw getPaymentError("PAYMENT_NOT_AWAITING_CONFIRMATION");
+      return res.status(404).json({
+        success: false,
+        message: "Bank transfer payment not found.",
+      });
     }
 
-    if (!payment.transferSenderName) {
-      throw getPaymentError("BANK_TRANSFER_SENDER_REQUIRED");
+    // Make repeated confirmation requests safe.
+    if (payment.status === "successful") {
+      return res.status(200).json({
+        success: true,
+        alreadyProcessed: true,
+        message: "This bank transfer has already been confirmed.",
+        payment,
+      });
     }
 
-    // Only proceed after independently verifying the funds
-    // in the ABS CUT bank account.
+    if (payment.status !== "awaiting_confirmation") {
+      return res.status(400).json({
+        success: false,
+        message: "This transfer is not awaiting confirmation.",
+      });
+    }
+
+    if (
+      !payment.transferSenderName ||
+      !payment.receiptUrl ||
+      !payment.evidenceSubmittedAt
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "The customer has not submitted complete transfer evidence.",
+      });
+    }
+
+    // Compare monetary values in kobo to avoid
+    // JavaScript floating-point precision problems.
+    if (toKobo(amount) !== toKobo(payment.amount)) {
+      return res.status(400).json({
+        success: false,
+        message: "The verified bank amount does not match the payment amount.",
+        expectedAmount: payment.amount,
+        verifiedAmount: amount,
+      });
+    }
+
+    // Do not trust the uploaded receipt alone.
+    // The admin must independently verify the transaction in the bank account.
     const result = await applyNewPayment({
       paymentId: payment._id,
       provider: "bank_transfer",
-      transactionId: transactionNumber,
+      transactionId,
       confirmedBy: getUserId(req),
     });
+
+    if (!result || !result.payment) {
+      throw new Error("Payment confirmation could not be completed.");
+    }
+
     if (!result.alreadyProcessed) {
       await notifyAdminPaymentSafely({
         payment: result.payment,
-        order: result.order,
       });
     }
 
     return res.status(200).json({
       success: true,
-      message: "Bank transfer confirmed successfully.",
+      alreadyProcessed: Boolean(result.alreadyProcessed),
+      message: result.alreadyProcessed
+        ? "This bank transfer has already been confirmed."
+        : "Bank transfer confirmed successfully.",
       payment: result.payment,
     });
   } catch (error) {
-    return sendError(res, error, "Confirm bank transfer error:");
+    console.error("Confirm bank transfer error:", error);
+
+    if (error.code === 11000) {
+      return res.status(409).json({
+        success: false,
+        message:
+          "This bank transaction ID has already been used for another payment.",
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to confirm bank transfer.",
+    });
   }
 };
-
-// ============================================================
-// BANK TRANSFER — ADMIN LISTS PENDING TRANSFERS
-// ============================================================
 
 const getPendingBankTransfers = async (req, res) => {
   try {
     const payments = await Payment.find({
       provider: "bank_transfer",
       status: "awaiting_confirmation",
+      transferSenderName: {
+        $type: "string",
+        $ne: "",
+      },
+      receiptUrl: {
+        $type: "string",
+        $ne: "",
+      },
+      evidenceSubmittedAt: {
+        $type: "date",
+      },
     })
-      .populate("user", "firstName lastName email")
-      .sort({ createdAt: 1 });
+      .populate("user", "firstName lastName name email")
+      .sort({ evidenceSubmittedAt: -1 })
+      .lean();
+
+    const enrichedPayments = await Promise.all(
+      payments.map(async (payment) => {
+        let customer = payment.user || null;
+        let booking = null;
+
+        // =====================================================
+        // PARTY BOOKING DETAILS
+        // =====================================================
+
+        if (payment.orderType === "PartyBooking" && payment.orderId) {
+          booking = await PartyBooking.findById(payment.orderId)
+            .populate("customer", "firstName lastName name email")
+            .lean();
+
+          if (booking?.customer) {
+            customer = booking.customer;
+          }
+        }
+
+        // =====================================================
+        // ORDINARY ORDER DETAILS
+        // =====================================================
+
+        let order = null;
+
+        if (payment.orderType === "Order" && payment.orderId) {
+          order = await Order.findById(payment.orderId)
+            .select("_id total orderStatus")
+            .lean();
+        }
+
+        // =====================================================
+        // CUSTOM ORDER DETAILS
+        // =====================================================
+
+        if (payment.orderType === "CustomOrder" && payment.orderId) {
+          order = await CustomOrder.findById(payment.orderId)
+            .select("_id quotation status")
+            .lean();
+        }
+
+        // =====================================================
+        // PARTY BOOKING INSTALLMENT DETAILS
+        // =====================================================
+
+        const installmentId = payment.metadata?.installmentId || null;
+
+        let installment = null;
+
+        if (booking && installmentId) {
+          installment =
+            booking.installmentSchedule?.find(
+              (item) => String(item._id) === String(installmentId),
+            ) || null;
+        }
+
+        return {
+          ...payment,
+          customer,
+          booking,
+          order,
+          installment,
+        };
+      }),
+    );
 
     return res.status(200).json({
       success: true,
-      count: payments.length,
-      payments,
+      count: enrichedPayments.length,
+      payments: enrichedPayments,
     });
   } catch (error) {
-    return sendError(res, error, "Get pending bank transfers error:");
+    console.error("Get pending bank transfers error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to retrieve pending bank transfers.",
+    });
   }
 };
 
-// ============================================================
-// BANK TRANSFER — ADMIN REJECTS TRANSFER
-// ============================================================
-
 const rejectBankTransfer = async (req, res) => {
   try {
-    const { paymentId } = req.params;
+    const paymentId = req.body.paymentId || req.params.paymentId;
     const { rejectionReason } = req.body;
 
     if (!paymentId || !isValidObjectId(paymentId)) {
@@ -2166,16 +3494,13 @@ const rejectBankTransfer = async (req, res) => {
   }
 };
 
-// ============================================================
-// ADMIN — PAYMENT HISTORY
-// ============================================================
-
 const getAdminPaymentHistory = async (req, res) => {
   try {
     const { status, provider, orderType, page = 1, limit = 20 } = req.query;
 
     const filter = {};
 
+    // Preserve the existing filters.
     if (status) {
       filter.status = status;
     }
@@ -2186,10 +3511,47 @@ const getAdminPaymentHistory = async (req, res) => {
     ) {
       filter.provider = provider;
     }
+    const supportedOrderTypes = ["Order", "CustomOrder", "PartyBooking"];
 
-    if (orderType && ["Order", "CustomOrder"].includes(orderType)) {
+    if (orderType && supportedOrderTypes.includes(orderType)) {
       filter.orderType = orderType;
     }
+
+    const bankTransferHistoryFilter = {
+      $or: [
+        
+        {
+          provider: { $ne: "bank_transfer" },
+        },
+
+        {
+          provider: "bank_transfer",
+          status: { $nin: ["pending", "awaiting_confirmation"] },
+        },
+
+        {
+          provider: "bank_transfer",
+          status: "awaiting_confirmation",
+
+          transferSenderName: {
+            $type: "string",
+            $regex: /\S/,
+          },
+
+          receiptUrl: {
+            $type: "string",
+            $regex: /\S/,
+          },
+
+          evidenceSubmittedAt: {
+            $type: "date",
+          },
+        },
+       
+      ],
+    };
+
+    filter.$and = [...(filter.$and || []), bankTransferHistoryFilter];
 
     const safePage = Math.max(1, Number(page) || 1);
     const safeLimit = Math.min(100, Math.max(1, Number(limit) || 20));
@@ -2221,6 +3583,9 @@ const getAdminPaymentHistory = async (req, res) => {
   }
 };
 
+
+
+
 // ============================================================
 // EXPORTS — KEEP THESE NAMES FOR EXISTING ROUTES
 // ============================================================
@@ -2242,6 +3607,8 @@ module.exports = {
   confirmBankTransfer,
   getPendingBankTransfers,
   rejectBankTransfer,
-
+  initializePartyBookingPayment,
+  verifyPartyBookingPayment,
   getAdminPaymentHistory,
 };
+

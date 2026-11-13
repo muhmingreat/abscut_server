@@ -1,7 +1,12 @@
+
 const mongoose = require("mongoose");
 
 const paymentSchema = new mongoose.Schema(
   {
+    // =====================================================
+    // USER
+    // =====================================================
+
     user: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -9,21 +14,42 @@ const paymentSchema = new mongoose.Schema(
       index: true,
     },
 
+    // =====================================================
+    // PAYMENT PURPOSE
+    // =====================================================
+
+    // CourseEnrollment is added without removing existing
+    // shop payment types.
     orderType: {
       type: String,
-      enum: ["Order", "CustomOrder"],
+      enum: [
+        "Order",
+        "CustomOrder",
+        "PartyBooking",
+        "CourseEnrollment",
+      ],
       required: true,
     },
 
+    // For Academy payments, this references CourseEnrollment.
+    // For shop payments, it retains its existing meaning.
     orderId: {
       type: mongoose.Schema.Types.ObjectId,
       required: true,
       index: true,
     },
 
+    // =====================================================
+    // PAYMENT PROVIDER
+    // =====================================================
+
     provider: {
       type: String,
-      enum: ["paystack", "flutterwave", "bank_transfer"],
+      enum: [
+        "paystack",
+        "flutterwave",
+        "bank_transfer",
+      ],
       required: true,
     },
 
@@ -40,6 +66,10 @@ const paymentSchema = new mongoose.Schema(
       trim: true,
     },
 
+    // =====================================================
+    // PAYMENT AMOUNT
+    // =====================================================
+
     amount: {
       type: Number,
       required: true,
@@ -52,6 +82,34 @@ const paymentSchema = new mongoose.Schema(
       default: "NGN",
       required: true,
     },
+
+    // =====================================================
+    // ACADEMY INSTALLMENT DETAILS
+    // =====================================================
+
+    // These fields are optional for normal shop payments.
+
+    paymentPlan: {
+      type: String,
+      enum: ["full", "installment"],
+      default: undefined,
+    },
+
+    installmentNumber: {
+      type: Number,
+      min: 1,
+      default: undefined,
+    },
+
+    totalInstallments: {
+      type: Number,
+      min: 1,
+      default: undefined,
+    },
+
+    // =====================================================
+    // PAYMENT STATUS
+    // =====================================================
 
     status: {
       type: String,
@@ -67,6 +125,7 @@ const paymentSchema = new mongoose.Schema(
       default: "pending",
       required: true,
     },
+
     rejectionReason: {
       type: String,
       trim: true,
@@ -84,17 +143,47 @@ const paymentSchema = new mongoose.Schema(
       default: null,
     },
 
+    // =====================================================
+    // BANK TRANSFER INFORMATION
+    // =====================================================
+
     transferSenderName: {
       type: String,
-      default: "",
       trim: true,
+      default: "",
+    },
+
+    transferAmount: {
+      type: Number,
+      min: 0.01,
+      default: undefined,
+    },
+
+    transferDate: {
+      type: Date,
+      default: null,
+    },
+
+    transferTransactionId: {
+      type: String,
+      trim: true,
+      default: "",
     },
 
     receiptUrl: {
       type: String,
-      default: "",
       trim: true,
+      default: "",
     },
+
+    evidenceSubmittedAt: {
+      type: Date,
+      default: null,
+    },
+
+    // =====================================================
+    // VERIFICATION
+    // =====================================================
 
     verifiedAt: {
       type: Date,
@@ -117,6 +206,10 @@ const paymentSchema = new mongoose.Schema(
       default: null,
     },
 
+    // =====================================================
+    // ADDITIONAL INFORMATION
+    // =====================================================
+
     metadata: {
       type: mongoose.Schema.Types.Mixed,
       default: {},
@@ -124,18 +217,50 @@ const paymentSchema = new mongoose.Schema(
   },
   {
     timestamps: true,
-  },
+  }
 );
 
-// Declare this compound index only once.
+// =====================================================
+// INDEXES
+// =====================================================
+
+// Prevent duplicate payment references.
 paymentSchema.index(
-  { provider: 1, transactionId: 1 },
+  {
+    reference: 1,
+  },
+  {
+    unique: true,
+  }
+);
+
+// Prevent duplicate gateway transaction IDs.
+paymentSchema.index(
+  {
+    provider: 1,
+    transactionId: 1,
+  },
   {
     unique: true,
     partialFilterExpression: {
-      transactionId: { $type: "string" },
+      transactionId: {
+        $type: "string",
+      },
     },
-  },
+  }
 );
+
+// Retrieve all payments belonging to an order/enrolment.
+paymentSchema.index({
+  orderType: 1,
+  orderId: 1,
+  createdAt: -1,
+});
+
+// Retrieve a user's payment history.
+paymentSchema.index({
+  user: 1,
+  createdAt: -1,
+});
 
 module.exports = mongoose.model("Payment", paymentSchema);

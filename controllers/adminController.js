@@ -1,4 +1,3 @@
-
 const User = require("../models/User");
 const Product = require("../models/Product");
 const Order = require("../models/Order");
@@ -36,9 +35,7 @@ const getDashboardStats = async (req, res) => {
     ]);
 
     const totalRevenue =
-      revenueResult.length > 0
-        ? revenueResult[0].totalRevenue
-        : 0;
+      revenueResult.length > 0 ? revenueResult[0].totalRevenue : 0;
 
     return res.status(200).json({
       success: true,
@@ -190,7 +187,8 @@ const updateAdminOrderStatus = async (req, res) => {
       if (orderStatus === "cancelled") {
         return res.status(200).json({
           success: true,
-          message: "This order is already cancelled. Stock was not restored again.",
+          message:
+            "This order is already cancelled. Stock was not restored again.",
           order,
         });
       }
@@ -227,14 +225,8 @@ const updateAdminOrderStatus = async (req, res) => {
       for (const item of order.items) {
         const quantity = Number(item.quantity);
 
-        if (
-          !item.product ||
-          !Number.isInteger(quantity) ||
-          quantity < 1
-        ) {
-          throw new Error(
-            `Invalid product or quantity in order ${order._id}.`
-          );
+        if (!item.product || !Number.isInteger(quantity) || quantity < 1) {
+          throw new Error(`Invalid product or quantity in order ${order._id}.`);
         }
 
         // -----------------------------------------------
@@ -251,7 +243,7 @@ const updateAdminOrderStatus = async (req, res) => {
           {
             new: true,
             session,
-          }
+          },
         );
 
         if (!updatedProduct) {
@@ -278,11 +270,10 @@ const updateAdminOrderStatus = async (req, res) => {
               stockAfter: updatedProduct.stock,
               order: order._id,
               performedBy: req.user._id,
-              reason:
-                "Stock restored because the admin cancelled the order.",
+              reason: "Stock restored because the admin cancelled the order.",
             },
           ],
-          { session }
+          { session },
         );
       }
     }
@@ -318,17 +309,11 @@ const updateAdminOrderStatus = async (req, res) => {
       try {
         await session.abortTransaction();
       } catch (abortError) {
-        console.error(
-          "Transaction abort error:",
-          abortError
-        );
+        console.error("Transaction abort error:", abortError);
       }
     }
 
-    console.error(
-      "Update admin order status error:",
-      error
-    );
+    console.error("Update admin order status error:", error);
 
     return res.status(500).json({
       success: false,
@@ -338,7 +323,6 @@ const updateAdminOrderStatus = async (req, res) => {
     await session.endSession();
   }
 };
-
 
 // const updateAdminOrderStatus = async (req, res) => {
 //   try {
@@ -399,16 +383,13 @@ const getAdminCustomers = async (req, res) => {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const limit = Math.min(
       100,
-      Math.max(1, parseInt(req.query.limit, 10) || 20)
+      Math.max(1, parseInt(req.query.limit, 10) || 20),
     );
 
-    const filter = {};
+    const filter = {}
 
     if (search) {
-      const escaped = search.replace(
-        /[.*+?^${}()|[\]\\]/g,
-        "\\$&"
-      );
+      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
       const regex = new RegExp(escaped, "i");
 
@@ -423,7 +404,7 @@ const getAdminCustomers = async (req, res) => {
     const [customers, total] = await Promise.all([
       User.find(filter)
         .select(
-          "firstName lastName email phone avatar authProvider emailVerified role createdAt updatedAt"
+          "firstName lastName email phone avatar authProvider emailVerified role createdAt updatedAt",
         )
         .sort({ createdAt: -1 })
         .skip((page - 1) * limit)
@@ -453,47 +434,6 @@ const getAdminCustomers = async (req, res) => {
   }
 };
 
-// GET /api/admin/customers/:id
-// const getAdminCustomerById = async (req, res) => {
-//   try {
-//     const { id } = req.params;
-
-//     if (!/^[a-f\d]{24}$/i.test(id)) {
-//       return res.status(400).json({
-//         success: false,
-//         message: "Invalid customer ID.",
-//       });
-//     }
-
-//     const customer = await User.findOne({
-//       _id: id,
-//       role: "customer",
-//     }).select(
-//       "firstName lastName email phone avatar authProvider emailVerified role createdAt updatedAt"
-//     );
-
-//     if (!customer) {
-//       return res.status(404).json({
-//         success: false,
-//         message: "Customer not found.",
-//       });
-//     }
-
-//     return res.status(200).json({
-//       success: true,
-//       customer,
-//     });
-//   } catch (error) {
-//     console.error("Get admin customer error:", error);
-
-//     return res.status(500).json({
-//       success: false,
-//       message: "Unable to load customer details.",
-//     });
-//   }
-// };
-
-
 const getAdminCustomerById = async (req, res) => {
   try {
     const { id } = req.params;
@@ -506,7 +446,7 @@ const getAdminCustomerById = async (req, res) => {
     }
 
     const user = await User.findById(id).select(
-      "firstName lastName email phone avatar authProvider emailVerified role createdAt updatedAt"
+      "firstName lastName email phone avatar authProvider emailVerified role createdAt updatedAt",
     );
 
     if (!user) {
@@ -530,9 +470,7 @@ const getAdminCustomerById = async (req, res) => {
   }
 };
 
-
 // PUT /api/admin/customers/:id
-
 
 const updateAdminCustomer = async (req, res) => {
   try {
@@ -580,7 +518,7 @@ const updateAdminCustomer = async (req, res) => {
     ];
 
     const fields = allowedFields.filter((field) =>
-      Object.prototype.hasOwnProperty.call(req.body, field)
+      Object.prototype.hasOwnProperty.call(req.body, field),
     );
 
     if (fields.length === 0) {
@@ -605,10 +543,7 @@ const updateAdminCustomer = async (req, res) => {
         });
       }
 
-      if (
-        ["phone", "avatar"].includes(field) &&
-        typeof value !== "string"
-      ) {
+      if (["phone", "avatar"].includes(field) && typeof value !== "string") {
         return res.status(400).json({
           success: false,
           message: `${field} must be a string.`,
@@ -646,10 +581,7 @@ const updateAdminCustomer = async (req, res) => {
         });
       }
 
-      if (
-        field === "emailVerified" &&
-        typeof value !== "boolean"
-      ) {
+      if (field === "emailVerified" && typeof value !== "boolean") {
         return res.status(400).json({
           success: false,
           message: "Email verification must be true or false.",
@@ -663,8 +595,7 @@ const updateAdminCustomer = async (req, res) => {
         });
       }
 
-      user[field] =
-        typeof value === "string" ? value.trim() : value;
+      user[field] = typeof value === "string" ? value.trim() : value;
     }
 
     if (fields.includes("email")) {
@@ -726,7 +657,6 @@ const updateAdminCustomer = async (req, res) => {
   }
 };
 
-
 // DELETE /api/admin/customers/:id
 const deleteAdminCustomer = async (req, res) => {
   try {
@@ -773,14 +703,13 @@ const deleteAdminCustomer = async (req, res) => {
   }
 };
 
-
 /* =========================================================
    ABS CUT INVENTORY — CONFIGURATION
 ========================================================= */
 
 const LOW_STOCK_THRESHOLD = Math.max(
   0,
-  Number(process.env.LOW_STOCK_THRESHOLD) || 5
+  Number(process.env.LOW_STOCK_THRESHOLD) || 5,
 );
 
 /* =========================================================
@@ -852,7 +781,7 @@ const getInventoryMovements = async (req, res) => {
     const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
     const limit = Math.min(
       100,
-      Math.max(1, Number.parseInt(req.query.limit, 10) || 20)
+      Math.max(1, Number.parseInt(req.query.limit, 10) || 20),
     );
 
     const filter = {};
@@ -988,7 +917,7 @@ const adjustInventoryStock = async (req, res) => {
 
       if (!Number.isSafeInteger(stockAfter) || stockAfter < 0) {
         const error = new Error(
-          "This adjustment would make stock negative or exceed the supported quantity."
+          "This adjustment would make stock negative or exceed the supported quantity.",
         );
         error.statusCode = 400;
         throw error;
@@ -1008,12 +937,12 @@ const adjustInventoryStock = async (req, res) => {
           new: true,
           runValidators: true,
           session,
-        }
+        },
       );
 
       if (!updatedProduct) {
         const error = new Error(
-          "Stock changed during this adjustment. Please retry."
+          "Stock changed during this adjustment. Please retry.",
         );
         error.statusCode = 409;
         throw error;
@@ -1023,10 +952,7 @@ const adjustInventoryStock = async (req, res) => {
         [
           {
             product: product._id,
-            type:
-              quantityChange > 0
-                ? "stock_added"
-                : "manual_adjustment",
+            type: quantityChange > 0 ? "stock_added" : "manual_adjustment",
             quantityChange,
             stockBefore,
             stockAfter,
@@ -1034,7 +960,7 @@ const adjustInventoryStock = async (req, res) => {
             reason: reason.trim(),
           },
         ],
-        { session }
+        { session },
       );
 
       movement = createdMovement;
@@ -1057,7 +983,37 @@ const adjustInventoryStock = async (req, res) => {
           : "Unable to adjust inventory stock.",
     });
   } finally {
-    await session.endSession()
+    await session.endSession();
+  }
+};
+// =====================================================
+// ABS CUT LIVE — ADMIN STAFF LIST
+// GET /api/admin/staff
+// =====================================================
+
+const getAdminStaff = async (req, res) => {
+  try {
+    const staff = await User.find({
+      role: "staff",
+    })
+      .select("firstName lastName email phone avatar role")
+      .sort({
+        firstName: 1,
+        lastName: 1,
+      })
+      .lean();
+
+    return res.status(200).json({
+      success: true,
+      staff,
+    });
+  } catch (error) {
+    console.error("Get admin staff error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to load staff accounts.",
+    });
   }
 };
 
@@ -1082,522 +1038,5 @@ module.exports = {
   getInventorySummary,
   getInventoryMovements,
   adjustInventoryStock,
-};;
-
-
-
-
-
-
-
-
-
-
-// const User = require("../models/User");
-// const Product = require("../models/Product");
-// const Order = require("../models/Order");
-
-// const getDashboardStats = async (req, res) => {
-//   try {
-//     const [
-//       totalCustomers,
-//       totalProducts,
-//       totalOrders,
-//       pendingOrders,
-//       paidOrders,
-//     ] = await Promise.all([
-//       User.countDocuments({
-//         role: "customer",
-//       }),
-
-//       Product.countDocuments({
-//         active: true,
-//       }),
-
-//       Order.countDocuments(),
-
-//       Order.countDocuments({
-//         orderStatus: "pending",
-//       }),
-
-//       Order.countDocuments({
-//         paymentStatus: "paid",
-//       }),
-//     ]);
-
-//     const revenueResult = await Order.aggregate([
-//       {
-//         $match: {
-//           paymentStatus: "paid",
-//         },
-//       },
-//       {
-//         $group: {
-//           _id: null,
-//           totalRevenue: {
-//             $sum: "$total",
-//           },
-//         },
-//       },
-//     ]);
-
-//     const totalRevenue =
-//       revenueResult.length > 0 ? revenueResult[0].totalRevenue : 0;
-
-//     res.status(200).json({
-//       success: true,
-//       stats: {
-//         totalCustomers,
-//         totalProducts,
-//         totalOrders,
-//         pendingOrders,
-//         paidOrders,
-//         totalRevenue,
-//       },
-//     });
-//   } catch (error) {
-//     console.error("Admin dashboard error:", error)
-
-
-
-//     res.status(500).json({
-//       success: false,
-//       message: "Unable to load dashboard statistics."
-//     });
-//   }
-// };
-
-// const getAdminOrders = async (req, res) => {
-//   try {
-//     const orders = await Order.find()
-//       .populate("user", "firstName lastName email phone")
-//       .sort({
-//         createdAt: -1,
-//       });
-
-//     res.status(200).json({
-//       success: true,
-//       orders,
-//     });
-//   } catch (error) {
-//     console.error("Admin orders error:", error);
-
-//     res.status(500).json({
-//       success: false,
-//       message: "Unable to load admin orders.",
-//     });
-//   }
-// };
-
-// const getAdminOrderById = async (req, res) => {
-//   try {
-//     const { id } = req.params;
-//     const order = await Order.findById(id)
-//       .populate("user", "firstName lastName email phone")
-//       .populate("items.product", "name image category stock");
-//     if (!order) {
-//       return res
-//         .status(404)
-//         .json({ success: false, message: "Order not found." });
-//     }
-//     res.status(200).json({ success: true, order });
-//   } catch (error) {
-//     console.error("Admin order details error:", error)
-//     res
-//       .status(500)
-//       .json({ success: false, message: "Unable to load order details." });
-//   }
-// };
-
-// const updateAdminOrderStatus = async (req, res) => {
-//   try {
-
-//     const { id } = req.params;
-//     const { orderStatus } = req.body;
-
-//     const allowedStatuses = [
-//       "pending",
-//       "confirmed",
-//       "processing",
-//       "shipped",
-//       "delivered",
-//       "cancelled",
-//     ];
-
-//     if (!orderStatus) {
-//       return res.status(400).json({
-//         success: false,
-//         message: "Order status is required.",
-//       });
-//     }
-
-//     if (!allowedStatuses.includes(orderStatus)) {
-//       return res.status(400).json({
-//         success: false,
-//         message: "Invalid order status.",
-//       });
-//     }
-
-//     const order = await Order.findById(id)
-
-//     if (!order) {
-//       return res.status(404).json({
-//         success: false,
-//         message: "Order not found.",
-//       });
-//     }
-
-//     order.orderStatus = orderStatus;
-
-//     await order.save();
-
-//     res.status(200).json({
-//       success: true,
-//       message: "Order status updated successfully.",
-//       order,
-//     });
-//   } catch (error) {
-//     console.error(
-//       "Update admin order status error:",
-//       error
-//     );
-
-//     res.status(500).json({
-//       success: false,
-//       message:
-//         "Unable to update order status.",
-//     });
-//   }
-// };
-
-
-
-// /* =====================================================
-//    ABS CUT — CUSTOMER MANAGEMENT
-// ===================================================== */
-
-// // GET /api/admin/customers
-// const getAdminCustomers = async (req, res) => {
-//   try {
-//     const {
-//       search = "",
-//       page = "1",
-//       limit = "20",
-//     } = req.query;
-
-//     const currentPage = Math.max(1, Number(page) || 1);
-//     const pageSize = Math.min(
-//       100,
-//       Math.max(1, Number(limit) || 20)
-//     );
-
-//     const filter = {
-//       role: "customer",
-//     };
-
-//     const searchText = String(search).trim();
-
-//     if (searchText) {
-//       const escaped = searchText.replace(
-//         /[.*+?^${}()|[\]\\]/g,
-//         "\\$&"
-//       );
-
-//       const regex = new RegExp(escaped, "i");
-
-//       filter.$or = [
-//         { firstName: regex },
-//         { lastName: regex },
-//         { email: regex },
-//         { phone: regex },
-//       ];
-//     }
-
-//     const [customers, total] = await Promise.all([
-//       User.find(filter)
-//         .select(
-//           "firstName lastName email phone avatar authProvider emailVerified role createdAt updatedAt"
-//         )
-//         .sort({ createdAt: -1 })
-//         .skip((currentPage - 1) * pageSize)
-//         .limit(pageSize)
-//         .lean(),
-
-//       User.countDocuments(filter),
-//     ]);
-
-//     return res.status(200).json({
-//       success: true,
-//       customers,
-//       pagination: {
-//         page: currentPage,
-//         limit: pageSize,
-//         total,
-//         totalPages: Math.ceil(total / pageSize),
-//       },
-//     });
-//   } catch (error) {
-//     console.error("Get admin customers error:", error);
-
-//     return res.status(500).json({
-//       success: false,
-//       message: "Unable to load customers.",
-//     });
-//   }
-// };
-
-
-// // GET /api/admin/customers/:id
-// const getAdminCustomerById = async (req, res) => {
-//   try {
-//     const { id } = req.params;
-
-//     if (!/^[a-f\d]{24}$/i.test(id)) {
-//       return res.status(400).json({
-//         success: false,
-//         message: "Invalid customer ID.",
-//       });
-//     }
-
-//     const customer = await User.findOne({
-//       _id: id,
-//       role: "customer",
-//     }).select(
-//       "firstName lastName email phone avatar authProvider emailVerified role createdAt updatedAt"
-//     );
-
-//     if (!customer) {
-//       return res.status(404).json({
-//         success: false,
-//         message: "Customer not found.",
-//       });
-//     }
-
-//     return res.status(200).json({
-//       success: true,
-//       customer,
-//     });
-//   } catch (error) {
-//     console.error("Get admin customer error:", error);
-
-//     return res.status(500).json({
-//       success: false,
-//       message: "Unable to load customer details.",
-//     });
-//   }
-// };
-
-
-// // PUT /api/admin/customers/:id
-// const updateAdminCustomer = async (req, res) => {
-//   try {
-//     const { id } = req.params;
-
-//     if (!/^[a-f\d]{24}$/i.test(id)) {
-//       return res.status(400).json({
-//         success: false,
-//         message: "Invalid customer ID.",
-//       });
-//     }
-
-//     const customer = await User.findOne({
-//       _id: id,
-//       role: "customer",
-//     });
-
-//     if (!customer) {
-//       return res.status(404).json({
-//         success: false,
-//         message: "Customer not found.",
-//       });
-//     }
-
-//     const allowedFields = [
-//       "firstName",
-//       "lastName",
-//       "email",
-//       "phone",
-//       "avatar",
-//       "emailVerified",
-//     ];
-
-//     const suppliedFields = allowedFields.filter(
-//       (field) =>
-//         Object.prototype.hasOwnProperty.call(
-//           req.body,
-//           field
-//         )
-//     );
-
-//     if (suppliedFields.length === 0) {
-//       return res.status(400).json({
-//         success: false,
-//         message: "No editable customer fields were provided.",
-//       });
-//     }
-
-//     for (const field of suppliedFields) {
-//       const value = req.body[field];
-
-//       if (
-//         field === "emailVerified" &&
-//         typeof value !== "boolean"
-//       ) {
-//         return res.status(400).json({
-//           success: false,
-//           message: "Email verification must be true or false.",
-//         });
-//       }
-
-//       if (
-//         ["firstName", "lastName", "email"].includes(field) &&
-//         (typeof value !== "string" || !value.trim())
-//       ) {
-//         return res.status(400).json({
-//           success: false,
-//           message: `${field} is required.`,
-//         });
-//       }
-
-//       if (
-//         ["phone", "avatar"].includes(field) &&
-//         typeof value !== "string"
-//       ) {
-//         return res.status(400).json({
-//           success: false,
-//           message: `${field} must be a string.`,
-//         });
-//       }
-
-//       if (
-//         typeof value === "string" &&
-//         value.length > 254
-//       ) {
-//         return res.status(400).json({
-//           success: false,
-//           message: `${field} is too long.`,
-//         });
-//       }
-
-//       if (typeof value === "string") {
-//         customer[field] = value.trim();
-//       } else {
-//         customer[field] = value;
-//       }
-//     }
-
-//     if (suppliedFields.includes("email")) {
-//       customer.email = customer.email.toLowerCase();
-
-//       const existingEmail = await User.findOne({
-//         email: customer.email,
-//         _id: { $ne: customer._id },
-//       }).select("_id");
-
-//       if (existingEmail) {
-//         return res.status(409).json({
-//           success: false,
-//           message: "That email address is already in use.",
-//         });
-//       }
-//     }
-
-//     await customer.save();
-
-//     return res.status(200).json({
-//       success: true,
-//       message: "Customer updated successfully.",
-//       customer: {
-//         id: customer._id,
-//         firstName: customer.firstName,
-//         lastName: customer.lastName,
-//         email: customer.email,
-//         phone: customer.phone,
-//         avatar: customer.avatar,
-//         authProvider: customer.authProvider,
-//         emailVerified: customer.emailVerified,
-//         role: customer.role,
-//         createdAt: customer.createdAt,
-//         updatedAt: customer.updatedAt,
-//       },
-//     });
-//   } catch (error) {
-//     console.error("Update admin customer error:", error);
-
-//     if (error.code === 11000) {
-//       return res.status(409).json({
-//         success: false,
-//         message: "That email address is already in use.",
-//       });
-//     }
-
-//     if (error.name === "ValidationError") {
-//       return res.status(400).json({
-//         success: false,
-//         message: "Customer details failed validation.",
-//       });
-//     }
-
-//     return res.status(500).json({
-//       success: false,
-//       message: "Unable to update customer.",
-//     });
-//   }
-// };
-
-
-// // DELETE /api/admin/customers/:id
-// const deleteAdminCustomer = async (req, res) => {
-//   try {
-//     const { id } = req.params;
-
-//     if (!/^[a-f\d]{24}$/i.test(id)) {
-//       return res.status(400).json({
-//         success: false,
-//         message: "Invalid customer ID.",
-//       });
-//     }
-
-//     const customer = await User.findOne({
-//       _id: id,
-//       role: "customer",
-//     }).select("_id");
-
-//     if (!customer) {
-//       return res.status(404).json({
-//         success: false,
-//         message: "Customer not found.",
-//       });
-//     }
-
-//     await User.deleteOne({
-//       _id: customer._id,
-//       role: "customer",
-//     });
-
-//     return res.status(200).json({
-//       success: true,
-//       message: "Customer account deleted successfully.",
-//       customerId: String(customer._id),
-//     });
-//   } catch (error) {
-//     console.error("Delete admin customer error:", error);
-
-//     return res.status(500).json({
-//       success: false,
-//       message: "Unable to delete customer.",
-//     });
-//   }
-// };
-
-// module.exports = {
-//   getDashboardStats,
-//   getAdminOrders,
-//   getAdminOrderById,
-//   updateAdminOrderStatus,
-//   getAdminCustomers,
-//   getAdminCustomerById,
-//   updateAdminCustomer,
-//   deleteAdminCustomer,
-// };
-
+  getAdminStaff,
+};

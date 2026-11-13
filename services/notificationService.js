@@ -7,13 +7,8 @@ const {
   sendSms,
 } = require("./smsService");
 
-// =====================================================
-// ABS CUT — NOTIFICATION SERVICE
-// =====================================================
-
-// =====================================================
-// ESCAPE HTML
-// =====================================================
+const Notification = require("../models/Notification");
+const User = require("../models/User");
 
 function escapeHtml(value = "") {
   return String(value)
@@ -157,12 +152,16 @@ async function notifyWelcome({ name, email, phone }) {
 // ORDER PLACED
 // =====================================================
 
+
+
 async function notifyOrderPlaced({
   name,
   email,
   phone,
   orderId,
   total,
+  userId,
+  io,
 }) {
   const displayId = String(orderId || "")
     .slice(-8)
@@ -171,54 +170,106 @@ async function notifyOrderPlaced({
   const safeName = escapeHtml(customerName({ name }));
   const money = formatMoney(total);
 
-  const emailResult = await sendEmail({
-    to: email,
-    subject: `ABS CUT Order Received #${displayId}`,
-    text:
-      `Your ABS CUT order #${displayId} has been received. ` +
-      `Total: ${money}.`,
-    html: wrapEmail(
-      "Order Received",
-      `
-        <p>Hello ${safeName},</p>
+  const tasks = [];
 
-        <p>We have received your ABS CUT order successfully.</p>
+  // 1. Customer email
+  tasks.push(
+    sendEmail({
+      to: email,
+      subject: `ABS CUT Order Received #${displayId}`,
+      text:
+        `Your ABS CUT order #${displayId} has been received. ` +
+        `Total: ${money}.`,
+      html: wrapEmail(
+        "Order Received",
+        `
+          <p>Hello ${safeName},</p>
 
-        <p>
-          <strong>Order:</strong>
-          #${escapeHtml(displayId)}
-        </p>
+          <p>We have received your ABS CUT order successfully.</p>
 
-        <p>
-          <strong>Total:</strong>
-          ${escapeHtml(money)}
-        </p>
+          <p>
+            <strong>Order:</strong>
+            #${escapeHtml(displayId)}
+          </p>
 
-        <p>
-          We will keep you updated as your order moves
-          through processing.
-        </p>
-      `
-    ),
-  });
+          <p>
+            <strong>Total:</strong>
+            ${escapeHtml(money)}
+          </p>
 
-  let smsResult = null;
+          <p>
+            We will keep you updated as your order moves
+            through processing.
+          </p>
+        `
+      ),
+    })
+  );
 
+  // 2. Customer SMS
   if (phone) {
-    smsResult = await sendSms({
-      to: phone,
-      message:
-        `ABS CUT: Order #${displayId} received. ` +
-        `Total ${money}. We will update you as processing continues.`,
-    });
+    tasks.push(
+      sendSms({
+        to: phone,
+        message:
+          `ABS CUT: Order #${displayId} received. ` +
+          `Total ${money}. We will update you as processing continues.`,
+      })
+    );
   }
 
-  return { email: emailResult, sms: smsResult };
-}
+  // 3. Customer in-app notification
+  tasks.push(
+    createNotification({
+      io,
+      userId,
+      title: "Order received successfully",
+      message:
+        `Your order #${displayId} has been received. ` +
+        `Total: ${money}.`,
+      type: "order",
+      link: "/my-orders",
+      metadata: {
+        orderId: String(orderId),
+        total,
+      },
+    })
+  );
 
-// =====================================================
-// NORMAL ORDER STATUS
-// =====================================================
+  // 4. Separate in-app notification for administrators
+  tasks.push(
+    notifyAdmins({
+      io,
+      title: "New customer order",
+      message:
+        `${name || "A customer"} placed order #${displayId}. ` +
+        `Order total: ${money}.`,
+      type: "order",
+      link: "/admin/orders",
+      metadata: {
+        orderId: String(orderId),
+        total,
+        customerName: name || "Customer",
+        customerEmail: email || "",
+      },
+    })
+  );
+
+  // Each notification channel runs independently.
+  const results = await Promise.allSettled(tasks);
+
+  results.forEach((result, index) => {
+    if (result.status === "rejected") {
+      console.error(
+        `ABS CUT order notification task ${index + 1} failed:`,
+        result.reason
+      );
+    }
+  });
+
+  return results;
+}
+ 
 
 async function notifyOrderStatus({
   name,
@@ -586,6 +637,98 @@ async function notifyNewProduct({
   });
 }
 
+
+
+async function createNotification({
+  io,
+  userId,
+  title,
+  message,
+  type = "general",
+  link = "",
+  metadata = {},
+}) {
+  if (!userId) {
+    throw new Error("Notification recipient is required.");
+  }
+
+  const user = await User.findById(userId).select("_id role");
+
+  if (!user) {
+    throw new Error("Notification recipient was not found.");
+  }
+
+  const notification = await Notification.create({
+    recipient: user._id,
+    recipientRole: user.role,
+    title,
+    message,
+    type,
+    link,
+    metadata,
+  });
+
+  const populatedNotification = await Notification.findById(
+    notification._id
+  ).populate("recipient", "firstName lastName name email role");
+
+  // Deliver immediately to all connected devices/sessions.
+  if (io) {
+    io.to(`user:${String(user._id)}`).emit(
+      "notification:new",
+      populatedNotification
+    );
+  }
+
+  return populatedNotification;
+}
+
+// =====================================================
+// NOTIFY ALL ADMINISTRATORS
+// =====================================================
+
+async function notifyAdmins({
+  io,
+  title,
+  message,
+  type = "general",
+  link = "",
+  metadata = {},
+}) {
+  const admins = await User.find({
+    role: "admin",
+  }).select("_id");
+
+  if (!admins.length) {
+    return [];
+  }
+
+  const notifications = await Notification.insertMany(
+    admins.map((admin) => ({
+      recipient: admin._id,
+      recipientRole: "admin",
+      title,
+      message,
+      type,
+      link,
+      metadata,
+    }))
+  );
+
+  if (io) {
+    notifications.forEach((notification) => {
+      io.to(`user:${String(notification.recipient)}`).emit(
+        "notification:new",
+        notification
+      );
+    });
+  }
+
+  return notifications;
+}
+
+
+
 // =====================================================
 // EXPORTS
 // =====================================================
@@ -601,6 +744,9 @@ module.exports = {
   notifyAdminPayment,
   notifyProductReady,
   notifyNewProduct,
+
+  createNotification,
+  notifyAdmins,
 };
 
 

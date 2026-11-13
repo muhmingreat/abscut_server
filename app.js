@@ -1,11 +1,14 @@
+require("dotenv").config();
 
+const dns = require("node:dns");
+dns.setServers(["8.8.8.8", "8.8.4.4"]);
 const express = require("express");
 const cors = require("cors");
-const dotenv = require("dotenv");
-const http = require("http");
+
+const http = require("http")
 const { Server } = require("socket.io");
 
-dotenv.config();
+const connectDB = require("./config/db");
 
 // =========================================================
 // ABS CUT — ROUTES
@@ -24,9 +27,20 @@ const customOrderRoutes = require("./routes/customOrderRoutes");
 const contactRoutes = require("./routes/contactRoutes");
 const chatRoutes = require("./routes/chatRoutes");
 const productEngagementRoutes = require("./routes/productEngagementRoutes");
-
+const aiOutfitPreviewRoutes = require("./routes/aiOutfitPreviewRoutes");
 const initializeChatSocket = require("./socket/chatSocket");
-const connectDB = require("./config/db");
+const activityRoutes = require("./routes/activityRoutes");
+const partyBookingRoutes = require("./routes/partyBookingRoutes");
+const deliveryRoutes = require("./routes/deliveryRoutes");
+const academyCertificateRoutes = require("./routes/academyCertificateRoutes");
+const academyPaymentRoutes = require("./routes/academyPaymentRoutes");
+const notificationRoutes = require("./routes/notificationRoutes");
+const academyAssignmentRoutes = require("./routes/academyAssignmentRoutes");
+const academyLiveClassRoutes = require("./routes/academyLiveClassRoutes");
+const academyCourseRoutes = require("./routes/academyCourseRoutes");
+const academyEnrollmentRoutes = require("./routes/academyEnrollmentRoutes");
+const academyProgressRoutes = require("./routes/academyProgressRoutes");
+const aiGuideRoutes = require("./routes/aiGuideRoutes")
 
 // =========================================================
 // APP & SERVER
@@ -94,8 +108,20 @@ app.use("/api/uploads", uploadRoutes);
 app.use("/api/custom-orders", customOrderRoutes);
 app.use("/api/contact", contactRoutes);
 app.use("/api/chat", chatRoutes);
+app.use("/api/activities", activityRoutes);
+app.use("/api/party-bookings", partyBookingRoutes);
 app.use("/api/product-engagement", productEngagementRoutes);
-
+app.use("/api/ai-outfit-preview", aiOutfitPreviewRoutes);
+app.use("/api/delivery", deliveryRoutes);
+app.use("/api/academy", academyCourseRoutes);
+app.use("/api/academy", academyEnrollmentRoutes);
+app.use("/api/academy", academyProgressRoutes);
+app.use("/api/academy", academyCertificateRoutes);
+app.use("/api/academy", academyPaymentRoutes);
+app.use("/api/notifications", notificationRoutes);
+app.use("/api/academy", academyAssignmentRoutes);
+app.use("/api/academy/live-classes", academyLiveClassRoutes);
+app.use("/api/ai-guide", aiGuideRoutes);
 // =========================================================
 // SOCKET.IO — CUSTOMER SUPPORT CHAT
 // =========================================================
@@ -103,6 +129,8 @@ app.use("/api/product-engagement", productEngagementRoutes);
 const io = new Server(server, {
   cors: corsOptions,
 });
+
+app.set("io", io);
 
 initializeChatSocket(io);
 
